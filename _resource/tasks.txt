@@ -1,0 +1,46 @@
+
+준비단계 (BROWSER)
+
+- 모든 오픈 가능한 브라우저를 proxy ip 로 열기
+  * proxy ip 할당 방법 순환 방법
+
+- 진행중 관리
+  * profile - proxy ip 관리 < ip는 순환해서 사용
+  * block 되면 profile 삭제하고 새로운 profile과 proxy ip 로 새로 브라우저 띄운다.
+
+- 모든 페이지 https://m.naver.com 페이지 열기
+
+준비단계 (TASK)
+- 서버에서 작업 목록 수신 (https://selltkey.com/scb/api/getUrlList_adspower.asp)
+
+준비 완료 check
+
+작업시작 (버튼 누르면)
+- 각 브라우저에 task 한개씩 처리..
+- 각 브라우저 시작시간은 random 0~500ms 대기 후 시작
+- 모든 작업 끝날때까지 대기
+- 모든 작업이 끝나면.. 평가하고, block 된 profile은 새로운 profile / proxy ip 로 다시 준비.
+- 정상 작업 된 task 는 작업목록에서 완료처리하고 블락된 처리에 대해서는 다시 시도할 수 있도록 목록에 다시 넣는다.
+- random delay (1초 이내) 후 다시 루프
+
+
+
+
+
+
+# 크롤링
+
+1. base url 처리
+  크롤링 task의 URLPLATFORMS이 NAVER 일 경우
+  현재 대상 브라우저의 URL이  https://www.naver.com/*
+  일경우는 skip
+  현재 대상 브라우저의 URL이  https://www.auction.co.kr/* 일 경우
+  대상 브라우저를 https://www.auction.co.kr로 변경로딩
+
+  크롤링 task의 URLPLATFORMS이 AUCTION 일 경우
+  반대로
+
+2. 브라우저 DOM에 <a>태그를 삽입 - href는 TARGETURL로 설정
+   그리고 마우스 버튼 클릭으로 삽입한 <a> 태그 클릭
+
+3. 새로운 페이지가 로딩이 완료되면 html을 크롤링

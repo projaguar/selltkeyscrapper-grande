@@ -1,0 +1,32 @@
+# main work flow
+
+- Profile 갯수에 맞춰 Browser 준비
+
+- Loop Start
+
+  - Task List 가져오기 (n개)
+  - Task 가 없으면
+    - 10분간 Delay
+    - continue
+
+  - Task 병렬 처리
+  - delay (대략 8초에서 15초)
+  
+  - 완료/실패(block)된 Task 처리
+  - today stop user 처리
+  - block 브라우저 처리
+
+-Loop End
+
+
+# Taks List 가져오기 flow
+- Task 가져오기 (n개)
+
+  - List 하나도 없으면
+    - List 조회 
+    - Today Stop User 데이터 삭제  (날짜가 넘어갔으면 clearing등도 처리)
+
+  - List 있으면 최대 n개만큼 return (없으면 [])
+
+
+    
