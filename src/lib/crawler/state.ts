@@ -1,8 +1,16 @@
 /**
- * Crawler 상태 관리
+ * Crawler 전역 상태 관리 (DDD 패턴 적용)
+ *
+ * 역할:
+ * - 크롤러 실행 상태 (running, stop 요청 등)
+ * - 진행 통계 (총 작업, 완료, 스킵 등)
+ * - todayStop 관리
+ *
+ * 주의: 브라우저별 상태는 CrawlerBrowser 객체가 직접 관리
  */
 
 import type { CrawlTask } from "./types";
+import type { BrowserStatusInfo } from "./CrawlerBrowser";
 
 // 오늘 처리 횟수가 초과된 USERNUM 목록 (메모리 기반)
 let blockedDate = new Date().toDateString();
@@ -17,37 +25,8 @@ let crawlerStartTime: number | null = null;
 // 크롤링 진행 상태
 let totalTasksCount = 0;
 let completedTasksCount = 0;
-let skippedTasksCount = 0;  // 오류/CAPTCHA로 스킵된 Task 수
+let skippedTasksCount = 0;
 let currentBatchNumber = 0;
-
-// 브라우저별 상태 추적
-export type BrowserStatus =
-  | 'idle'           // 대기 중
-  | 'crawling'       // 크롤링 중
-  | 'success'        // 성공
-  | 'warning'        // 경고 (상품 없음, 해외배송 아님 등)
-  | 'error'          // 오류 (실제 예외)
-  | 'waiting'        // 배치 대기
-  | 'recreating'     // CAPTCHA로 프로필 재생성 중
-  | 'reconnecting';  // 연결 끊김 복구 중
-
-export interface BrowserStatusInfo {
-  browserIndex: number;
-  profileName: string;
-  status: BrowserStatus;
-  storeName?: string;
-  message?: string;
-  collectedCount?: number;
-}
-
-const browserStatuses: Map<number, BrowserStatusInfo> = new Map();
-
-// 배치 대기 상태
-let batchDelayInfo = {
-  isDelaying: false,
-  totalMs: 0,
-  startTime: 0,
-};
 
 /**
  * 날짜가 바뀌었으면 블록 목록 초기화
@@ -189,8 +168,6 @@ export function resetProgress(): void {
   completedTasksCount = 0;
   skippedTasksCount = 0;
   currentBatchNumber = 0;
-  browserStatuses.clear();
-  batchDelayInfo = { isDelaying: false, totalMs: 0, startTime: 0 };
 }
 
 /**
@@ -235,20 +212,34 @@ export interface CrawlerProgress {
   isRunning: boolean;
   totalTasks: number;
   completedTasks: number;
-  skippedTasks: number;  // 오류/CAPTCHA로 스킵된 Task
+  skippedTasks: number;
   pendingTasks: number;
   todayStopCount: number;
   currentBatch: number;
   elapsedTime: number;
   browserStatuses: BrowserStatusInfo[];
-  batchDelay: {
-    isDelaying: boolean;
-    totalMs: number;
-    elapsedMs: number;
-    remainingMs: number;
-  };
 }
 
+// CrawlerBrowser 배열을 외부에서 주입받아 상태 조회
+let browserStatusesGetter: (() => BrowserStatusInfo[]) | null = null;
+
+/**
+ * 브라우저 상태 조회 함수 등록 (crawler.ts에서 호출)
+ */
+export function registerBrowserStatusesGetter(getter: () => BrowserStatusInfo[]): void {
+  browserStatusesGetter = getter;
+}
+
+/**
+ * 브라우저 상태 조회 함수 해제
+ */
+export function unregisterBrowserStatusesGetter(): void {
+  browserStatusesGetter = null;
+}
+
+/**
+ * 크롤링 진행 상태 조회 (DDD 패턴)
+ */
 export function getCrawlerProgress(): CrawlerProgress {
   return {
     isRunning: isCrawlerRunning,
@@ -259,102 +250,6 @@ export function getCrawlerProgress(): CrawlerProgress {
     todayStopCount: blockedUserNums.size,
     currentBatch: currentBatchNumber,
     elapsedTime: getElapsedTime(),
-    browserStatuses: getAllBrowserStatuses(),
-    batchDelay: getBatchDelayInfo(),
-  };
-}
-
-// =====================================================
-// 브라우저별 상태 관리
-// =====================================================
-
-/**
- * 브라우저 상태 초기화
- */
-export function initBrowserStatuses(browsers: { index: number; profileName: string }[]): void {
-  browserStatuses.clear();
-  browsers.forEach(({ index, profileName }) => {
-    browserStatuses.set(index, {
-      browserIndex: index,
-      profileName,
-      status: 'idle',
-    });
-  });
-}
-
-/**
- * 브라우저 상태 업데이트
- */
-export function updateBrowserStatus(
-  browserIndex: number,
-  update: Partial<BrowserStatusInfo>
-): void {
-  const current = browserStatuses.get(browserIndex);
-  if (current) {
-    browserStatuses.set(browserIndex, { ...current, ...update });
-  }
-}
-
-/**
- * 모든 브라우저 상태 가져오기
- */
-export function getAllBrowserStatuses(): BrowserStatusInfo[] {
-  return Array.from(browserStatuses.values()).sort((a, b) => a.browserIndex - b.browserIndex);
-}
-
-/**
- * 브라우저 상태 초기화 (크롤링 종료 시)
- */
-export function clearBrowserStatuses(): void {
-  browserStatuses.clear();
-}
-
-// =====================================================
-// 배치 대기 상태 관리
-// =====================================================
-
-/**
- * 배치 대기 시작
- */
-export function startBatchDelay(totalMs: number): void {
-  batchDelayInfo = {
-    isDelaying: true,
-    totalMs,
-    startTime: Date.now(),
-  };
-}
-
-/**
- * 배치 대기 종료
- */
-export function endBatchDelay(): void {
-  batchDelayInfo = {
-    isDelaying: false,
-    totalMs: 0,
-    startTime: 0,
-  };
-}
-
-/**
- * 배치 대기 정보 가져오기
- */
-export function getBatchDelayInfo(): {
-  isDelaying: boolean;
-  totalMs: number;
-  elapsedMs: number;
-  remainingMs: number;
-} {
-  if (!batchDelayInfo.isDelaying) {
-    return { isDelaying: false, totalMs: 0, elapsedMs: 0, remainingMs: 0 };
-  }
-
-  const elapsedMs = Date.now() - batchDelayInfo.startTime;
-  const remainingMs = Math.max(0, batchDelayInfo.totalMs - elapsedMs);
-
-  return {
-    isDelaying: true,
-    totalMs: batchDelayInfo.totalMs,
-    elapsedMs,
-    remainingMs,
+    browserStatuses: browserStatusesGetter ? browserStatusesGetter() : [],
   };
 }

@@ -1,56 +1,45 @@
 /**
- * Crawler 메인 플로우
+ * Crawler 메인 플로우 (Producer-Consumer Pattern with DDD)
  *
- * workflow.txt 기반:
- * - Profile 갯수에 맞춰 Browser 준비
- * - Loop Start
- *   - Task List 가져오기 (n개)
- *   - Task 없으면 10분간 Delay → continue
- *   - Task 병렬 처리
- *   - delay (8~15초) - 페이지 로드 후 적용
- *   - 완료/실패 Task 처리
- *   - today stop user 처리
- *   - block 브라우저 처리
- * - Loop End
+ * 새로운 아키텍처:
+ * - CrawlerBrowser: 도메인 객체 (브라우저/프로필 통합 관리)
+ * - Producer: Task Fetcher가 백그라운드에서 Task Queue에 추가
+ * - Consumer: 각 브라우저 Worker가 독립적으로 Queue에서 Task 가져와 처리
  */
 
-import puppeteer from "puppeteer-core";
-
 // 타입
-import type { CrawlTask, CrawlResult, BrowserInfo, Session } from "./crawler/types";
+import type { CrawlTask, CrawlResult, Session } from "./crawler/types";
 export type { CrawlTask, CrawlResult, Session } from "./crawler/types";
 
-// 상태 관리
+// DDD: CrawlerBrowser 도메인 객체
+import { CrawlerBrowser } from "./crawler/CrawlerBrowser";
+
+// Task Queue Manager
+import { TaskQueueManager } from "./crawler/task-queue";
+
+// 상태 관리 (UI용)
 import {
   shouldStop,
   requestStop,
   isRunning,
   setRunning,
-  addTasksToQueue,
-  getBlockedUserCount,
-  getTaskQueueSize,
   resetProgress,
   incrementCompleted,
   incrementSkipped,
-  setCurrentBatch,
-  initBrowserStatuses,
-  updateBrowserStatus,
-  startBatchDelay,
-  endBatchDelay,
+  registerBrowserStatusesGetter,
+  unregisterBrowserStatusesGetter,
 } from "./crawler/state";
 
 // 모듈
-import { initializeBrowsers, keepaliveBrowsers } from "./crawler/browser-manager";
 import { fetchTasks, removeCompletedTasks, handleTodayStopResults } from "./crawler/task-manager";
-import { handleCaptchaDetected } from "./crawler/handlers/captcha";
-import { handleDisconnected } from "./crawler/handlers/reconnect";
 import { crawlNaver } from "./crawler/platforms/naver";
 import { crawlAuction } from "./crawler/platforms/auction";
+import { getProxyPool } from "./proxy-pool";
 
 // 10분 대기 시간 (ms)
 const EMPTY_QUEUE_DELAY = 10 * 60 * 1000;
 
-// 실제 오류로 분류할 키워드 (이 키워드가 포함되면 error, 아니면 warning)
+// 실제 오류로 분류할 키워드
 const ERROR_KEYWORDS = [
   'ECONNREFUSED',
   'timeout',
@@ -101,7 +90,6 @@ function classifyResult(
   }
 
   // 비즈니스 로직 실패 (해외배송 아님, 상품 없음 등) → warning
-  // 메시지를 더 친절하게 변환
   let friendlyMessage = errorMsg;
   if (errorMsg.includes('해외') || errorMsg.includes('overseas')) {
     friendlyMessage = '해외배송 아님';
@@ -121,7 +109,239 @@ function classifyResult(
 
 /**
  * =====================================================
- * 메인 배치 크롤링
+ * Browser Worker (Consumer) - DDD 패턴 적용
+ * =====================================================
+ * 각 브라우저가 독립적으로 Task Queue에서 Task를 가져와 처리
+ */
+async function browserWorker(
+  browser: CrawlerBrowser,
+  workerIndex: number,
+  taskQueue: TaskQueueManager,
+  insertUrl: string
+): Promise<void> {
+  const profileName = browser.getProfileName();
+  console.log(`[Worker ${workerIndex}] ${profileName} - Started`);
+
+  // 시작 시 Random Delay (0~15초) - Worker들이 동시에 시작하지 않도록
+  const initialDelayMs = Math.floor(Math.random() * 15000);
+  console.log(`[Worker ${workerIndex}] ${profileName} - Initial delay: ${(initialDelayMs / 1000).toFixed(1)}s`);
+  await delay(initialDelayMs);
+
+  while (!shouldStop()) {
+    // Queue에서 Task 가져오기
+    const task = taskQueue.getNext();
+
+    // Task 없으면 10초 대기 후 재시도
+    if (!task) {
+      browser.updateStatus('waiting', 'Task 대기 중...');
+      await delay(10000);
+      continue;
+    }
+
+    // 브라우저 에러 시 Task 실패 처리
+    if (browser.hasError()) {
+      const errorMsg = browser.getStatus().error || 'Browser error';
+      taskQueue.markFailed(task, errorMsg);
+      browser.updateStatus('error', errorMsg);
+      continue;
+    }
+
+    // Task 처리 시작
+    browser.startCrawling(task.TARGETSTORENAME);
+
+    try {
+      // Task 처리
+      const result = await processSingleTask(browser, task, insertUrl);
+
+      // 결과 분류 및 상태 업데이트
+      const collectedCount = result.data?.list?.length || 0;
+      const { status, message } = classifyResult(result, collectedCount);
+
+      browser.completeCrawling(status, message, status === 'success' ? collectedCount : undefined);
+
+      // Queue에 완료 표시
+      taskQueue.markComplete(task, result);
+
+      // 성공/실패 카운트
+      if (result.success) {
+        incrementCompleted(1);
+      } else {
+        incrementSkipped(1);
+      }
+
+      // CAPTCHA 감지 시 재시작
+      if (result.captchaDetected) {
+        console.log(`\n[Worker ${workerIndex}] CAPTCHA detected, restarting with new proxy...`);
+        await handleBrowserRestart(browser, workerIndex, 'CAPTCHA 감지');
+      }
+
+    } catch (error: any) {
+      // 예외 발생 시 실패 처리
+      const errorMsg = error.message || 'Unknown error';
+      taskQueue.markFailed(task, errorMsg);
+      browser.completeCrawling('error', errorMsg);
+      incrementSkipped(1);
+
+      // 네트워크 오류인지 확인
+      const NETWORK_ERROR_PATTERNS = [
+        "ECONNREFUSED", "net::ERR_", "페이지 로드 실패", "이동 실패",
+        "Navigation timeout", "Timeout waiting", "ETIMEDOUT",
+        "Cloudflare block detected", "IP change needed",
+      ];
+
+      const isNetworkError = NETWORK_ERROR_PATTERNS.some((pattern) =>
+        errorMsg.includes(pattern)
+      );
+
+      // 네트워크 오류면 브라우저 재시작
+      if (isNetworkError) {
+        console.log(`\n[Worker ${workerIndex}] Network error detected, restarting...`);
+        await handleBrowserRestart(browser, workerIndex, '네트워크 오류');
+      }
+    }
+
+    // Random Delay (8~15초) - 각 Worker마다 다른 시간
+    const randomDelayMs = Math.floor(Math.random() * 7000) + 8000;
+    console.log(`[Worker ${workerIndex}] ${profileName} - Delay: ${(randomDelayMs / 1000).toFixed(1)}s`);
+
+    browser.updateStatus('waiting', `대기 중 (${(randomDelayMs / 1000).toFixed(1)}s)...`);
+    await delay(randomDelayMs);
+  }
+
+  console.log(`[Worker ${workerIndex}] ${profileName} - Stopped`);
+}
+
+/**
+ * 브라우저 재시작 처리 (DDD 패턴)
+ */
+async function handleBrowserRestart(
+  browser: CrawlerBrowser,
+  workerIndex: number,
+  reason: string
+): Promise<void> {
+  browser.updateStatus('restarting', `${reason} - 새 IP 할당 및 재시작 중...`);
+
+  try {
+    // ProxyPool에서 새 Proxy 가져오기
+    const proxyPool = getProxyPool();
+
+    // 기존 Proxy를 dead로 표시
+    const oldProxyId = browser.getProxyId();
+    if (oldProxyId) {
+      proxyPool.markDead(oldProxyId);
+    }
+
+    // 새 Proxy 할당
+    const newProxy = proxyPool.getNextProxy();
+    if (!newProxy) {
+      browser.updateStatus('error', 'No available proxies');
+      return;
+    }
+
+    // 브라우저 재시작 (새 Proxy로)
+    await browser.restart(newProxy);
+
+    // Proxy를 in_use로 표시
+    proxyPool.markInUse(newProxy.id);
+
+    console.log(`[Worker ${workerIndex}] ${browser.getProfileName()} - Restarted with new proxy: ${newProxy.ip}:${newProxy.port}`);
+
+  } catch (error: any) {
+    browser.updateStatus('error', `재시작 실패: ${error.message}`);
+  }
+}
+
+/**
+ * =====================================================
+ * Task Fetcher (Producer)
+ * =====================================================
+ * 백그라운드에서 주기적으로 Task를 가져와 Queue에 추가
+ */
+async function taskFetcher(
+  taskQueue: TaskQueueManager,
+  insertUrlRef: { current: string },
+  batchSize: number
+): Promise<void> {
+  console.log(`[TaskFetcher] Started (fetch size: ${batchSize})`);
+
+  while (!shouldStop()) {
+    // Queue에 충분한 Task가 있으면 대기
+    if (taskQueue.size() >= batchSize) {
+      await delay(5000);
+      continue;
+    }
+
+    // Task 가져오기
+    const tasks = await fetchTasks(batchSize, insertUrlRef);
+
+    if (tasks.length === 0) {
+      console.log(`[TaskFetcher] No tasks available, waiting 10 minutes...`);
+      await delay(EMPTY_QUEUE_DELAY);
+      continue;
+    }
+
+    // Queue에 추가
+    taskQueue.addTasks(tasks);
+
+    // 통계 출력
+    const stats = taskQueue.getStats();
+    console.log(
+      `[TaskFetcher] Stats - Queue: ${stats.queueSize}, Processing: ${stats.processingCount}, ` +
+      `Completed: ${stats.completedCount}, Failed: ${stats.failedCount}`
+    );
+
+    // 짧은 대기 후 재시도
+    await delay(2000);
+  }
+
+  console.log(`[TaskFetcher] Stopped`);
+}
+
+/**
+ * =====================================================
+ * Result Handler (백그라운드 결과 처리)
+ * =====================================================
+ * 완료된 Task들을 주기적으로 처리 (todayStop, cleanup 등)
+ */
+async function resultHandler(
+  taskQueue: TaskQueueManager
+): Promise<void> {
+  console.log(`[ResultHandler] Started`);
+
+  while (!shouldStop()) {
+    // 10초마다 완료/실패 Task 처리
+    await delay(10000);
+
+    // 완료된 Tasks 가져오기
+    const completedTasks = taskQueue.getCompletedTasks();
+    if (completedTasks.length > 0) {
+      const tasks = completedTasks.map(ct => ct.task);
+      const results = completedTasks.map(ct => ct.result);
+
+      // 완료된 Task 제거
+      removeCompletedTasks(tasks);
+
+      // todayStop 처리
+      handleTodayStopResults(results, tasks);
+
+      console.log(`[ResultHandler] Processed ${completedTasks.length} completed tasks`);
+    }
+
+    // 실패한 Tasks도 정리
+    const failedTasks = taskQueue.getFailedTasks();
+    if (failedTasks.length > 0) {
+      const tasks = failedTasks.map(ft => ft.task);
+      removeCompletedTasks(tasks);
+      console.log(`[ResultHandler] Processed ${failedTasks.length} failed tasks`);
+    }
+  }
+
+  console.log(`[ResultHandler] Stopped`);
+}
+
+/**
+ * =====================================================
+ * 메인 크롤링 (Producer-Consumer Pattern with DDD)
  * =====================================================
  */
 export async function processBatch(
@@ -136,255 +356,174 @@ export async function processBatch(
 
   // 크롤러 상태 설정
   setRunning(true);
-  resetProgress(); // 진행 상태 초기화
+  resetProgress();
 
   const batchSize = sessions.length;
-  const results: CrawlResult[] = [];
   const insertUrlRef = { current: insertUrl || "" };
 
-  console.log(`\n[Crawler] Starting with ${batchSize} browsers\n`);
+  console.log(`\n[Crawler] Starting with ${batchSize} browser workers (DDD Pattern)\n`);
 
   // ========================================
-  // Step 1: 브라우저 준비
+  // Step 1: CrawlerBrowser 도메인 객체 생성
   // ========================================
-  const browsers = await initializeBrowsers(apiKey, sessions);
+  const browsers: CrawlerBrowser[] = [];
+  const proxyPool = getProxyPool();
 
-  // 브라우저 상태 초기화
-  initBrowserStatuses(
-    sessions.map((s, index) => ({ index, profileName: s.profileName }))
-  );
+  for (const session of sessions) {
+    const proxy = session.proxyId ? proxyPool.getProxyById(session.proxyId) : undefined;
+
+    const browser = new CrawlerBrowser({
+      profileId: session.profileId,
+      profileName: session.profileName,
+      apiKey,
+      proxy,
+    });
+
+    browsers.push(browser);
+  }
+
+  // ========================================
+  // Step 2: 모든 브라우저 시작
+  // ========================================
+  console.log(`[Crawler] Starting ${browsers.length} browsers...\n`);
+
+  for (let i = 0; i < browsers.length; i++) {
+    const browser = browsers[i];
+    try {
+      // 프록시 검증 활성화 (naver.com 이동 스킵)
+      await browser.start({ validateProxy: true, validateConnection: false });
+      console.log(`[Crawler] Browser ${i + 1}/${browsers.length} started: ${browser.getProfileName()}`);
+    } catch (error: any) {
+      console.error(`[Crawler] Failed to start browser ${browser.getProfileName()}: ${error.message}`);
+    }
+  }
+
+  // ========================================
+  // Step 3: Task Queue Manager 생성
+  // ========================================
+  const taskQueue = new TaskQueueManager();
+
+  // ========================================
+  // Step 4: 브라우저 상태 조회 함수 등록 (UI용)
+  // ========================================
+  registerBrowserStatusesGetter(() => browsers.map(b => b.getStatus()));
 
   try {
     // ========================================
-    // Step 2: 메인 루프
+    // Step 5: Workers 시작
     // ========================================
-    let batchNumber = 0;
 
-    while (!shouldStop()) {
-      // Task List 가져오기
-      const batchTasks = await fetchTasks(batchSize, insertUrlRef);
+    // Task Fetcher (Producer) 시작
+    const fetcherPromise = taskFetcher(taskQueue, insertUrlRef, batchSize);
 
-      // Task 없으면 10분 대기
-      if (batchTasks.length === 0) {
-        console.log(`[Crawler] No tasks available, waiting 10 minutes...`);
-        await delay(EMPTY_QUEUE_DELAY);
-        continue;
+    // Result Handler 시작
+    const handlerPromise = resultHandler(taskQueue);
+
+    // Browser Workers (Consumers) 시작
+    const workerPromises = browsers.map((browser, index) =>
+      browserWorker(browser, index, taskQueue, insertUrlRef.current)
+    );
+
+    // Keepalive 주기적으로 실행
+    const keepalivePromise = (async () => {
+      while (!shouldStop()) {
+        await delay(60000); // 1분마다
+        for (const browser of browsers) {
+          await browser.keepalive();
+        }
       }
+    })();
 
-      batchNumber++;
-      setCurrentBatch(batchNumber);
-      // Note: totalTasks는 task-manager.ts에서 서버 조회 시 이미 증가됨
+    // 모든 Workers 대기
+    console.log(`[Crawler] All workers started. Waiting for completion...\n`);
+    await Promise.race([
+      Promise.all([fetcherPromise, handlerPromise, ...workerPromises, keepalivePromise]),
+      new Promise<void>((resolve) => {
+        const checkStop = setInterval(() => {
+          if (shouldStop()) {
+            clearInterval(checkStop);
+            resolve();
+          }
+        }, 1000);
+      }),
+    ]);
 
-      console.log(
-        `[Crawler] Batch ${batchNumber}: ${batchTasks.length} tasks (queue: ${getTaskQueueSize()}, blocked: ${getBlockedUserCount()})`
-      );
-
-      // Task 병렬 처리
-      const batchResults = await processTasksInParallel(
-        apiKey,
-        browsers,
-        batchTasks,
-        insertUrlRef.current
-      );
-
-      results.push(...batchResults);
-
-      // 성공/실패 분류하여 카운트
-      const successCount = batchResults.filter(r => r.success).length;
-      const skippedCount = batchResults.length - successCount;
-      incrementCompleted(successCount);
-      incrementSkipped(skippedCount);
-
-      // 배치 완료 후 8~15초 랜덤 대기 (봇 감지 회피)
-      const batchDelayMs = Math.floor(Math.random() * (15000 - 8000 + 1)) + 8000;
-      console.log(`[Crawler] Batch delay: ${(batchDelayMs / 1000).toFixed(1)}s`);
-      startBatchDelay(batchDelayMs);
-      await delay(batchDelayMs);
-      endBatchDelay();
-
-      // 완료된 Task 제거
-      removeCompletedTasks(batchTasks);
-
-      // todayStop 처리
-      handleTodayStopResults(batchResults, batchTasks);
-
-      // CAPTCHA 처리
-      await handleCaptchaDetected(apiKey, batchResults, batchTasks, sessions, browsers);
-
-      // 연결 끊김 복구
-      await handleDisconnected(apiKey, batchResults, batchTasks, sessions, browsers);
-
-      // WebSocket Keepalive
-      await keepaliveBrowsers(browsers);
-
-      console.log(`[Crawler] Batch ${batchNumber} completed\n`);
-    }
   } finally {
     // ========================================
-    // Step 3: 정리
+    // Step 6: 정리
     // ========================================
+    // 브라우저 상태 조회 함수 해제
+    unregisterBrowserStatusesGetter();
+
     // 브라우저는 닫지 않음 (다음 준비 시 재연결 가능)
-    // await cleanupBrowsers(apiKey, browsers);
     setRunning(false);
-    console.log(`\n[Crawler] Finished. Total results: ${results.length}\n`);
+
+    const stats = taskQueue.getStats();
+    console.log(`\n[Crawler] Finished.`);
+    console.log(`  Completed: ${stats.completedCount}`);
+    console.log(`  Failed: ${stats.failedCount}`);
+    console.log(`  Remaining in queue: ${stats.queueSize}\n`);
   }
 
-  return results;
+  // 결과 반환 (빈 배열 - Worker 방식에서는 실시간 처리)
+  return [];
 }
 
 /**
  * =====================================================
- * Task 병렬 처리
- * =====================================================
- */
-async function processTasksInParallel(
-  _apiKey: string,
-  browsers: BrowserInfo[],
-  tasks: CrawlTask[],
-  insertUrl: string
-): Promise<CrawlResult[]> {
-  const promises = tasks.map((task, index) => {
-    const browserInfo = browsers[index];
-
-    // 브라우저 에러 시 즉시 반환
-    if (browserInfo.error) {
-      updateBrowserStatus(index, {
-        status: 'error',
-        storeName: task.TARGETSTORENAME,
-        message: `Browser error: ${browserInfo.error}`,
-      });
-      return Promise.resolve({
-        success: false,
-        urlNum: task.URLNUM,
-        storeName: task.TARGETSTORENAME,
-        error: `Browser error: ${browserInfo.error}`,
-      } as CrawlResult);
-    }
-
-    // 크롤링 시작 상태 업데이트
-    updateBrowserStatus(index, {
-      status: 'crawling',
-      storeName: task.TARGETSTORENAME,
-      message: '크롤링 중...',
-    });
-
-    // 단일 Task 처리
-    return processSingleTask(browserInfo, task, insertUrl)
-      .then((result) => {
-        // 결과에 따라 상태 업데이트
-        const collectedCount = result.data?.list?.length || 0;
-        const { status, message } = classifyResult(result, collectedCount);
-
-        updateBrowserStatus(index, {
-          status,
-          storeName: task.TARGETSTORENAME,
-          message,
-          collectedCount: status === 'success' ? collectedCount : undefined,
-        });
-        return result;
-      })
-      .catch((error) => {
-        // 실제 예외는 error로 표시
-        updateBrowserStatus(index, {
-          status: 'error',
-          storeName: task.TARGETSTORENAME,
-          message: error.message,
-        });
-        return {
-          success: false,
-          urlNum: task.URLNUM,
-          storeName: task.TARGETSTORENAME,
-          error: error.message,
-        } as CrawlResult;
-      });
-  });
-
-  return Promise.all(promises);
-}
-
-/**
- * =====================================================
- * 단일 Task 처리
+ * 단일 Task 처리 (DDD 패턴 적용)
  * =====================================================
  */
 async function processSingleTask(
-  browserInfo: BrowserInfo,
+  browser: CrawlerBrowser,
   task: CrawlTask,
   insertUrl: string
 ): Promise<CrawlResult> {
-  const { session, browserData } = browserInfo;
-  const profileName = session.profileName;
+  const profileName = browser.getProfileName();
 
   console.log(
     `[Crawler] ${profileName} - Processing ${task.TARGETSTORENAME} (${task.URLPLATFORMS})`
   );
 
-  // Puppeteer 연결
-  const wsUrl = browserData?.ws?.puppeteer;
-  if (!wsUrl) {
-    throw new Error("WebSocket URL not found");
+  // Browser 객체 확인
+  if (!browser.hasBrowser()) {
+    throw new Error("Browser not available");
   }
 
-  const browser = await puppeteer.connect({
-    browserWSEndpoint: wsUrl,
-    defaultViewport: null,
-  });
+  // 페이지 준비
+  const page = await preparePage(browser, task);
 
-  try {
-    // 페이지 준비
-    const page = await preparePage(browser, task, profileName);
+  // 페이지 이동
+  await navigateToTarget(page, task, profileName);
 
-    // 페이지 이동
-    await navigateToTarget(page, task, profileName);
-
-    // 플랫폼별 크롤링
-    if (task.URLPLATFORMS === "NAVER") {
-      return await crawlNaver(page, task, insertUrl, profileName);
-    } else if (task.URLPLATFORMS === "AUCTION") {
-      return await crawlAuction(page, task, insertUrl, profileName);
-    } else {
-      return {
-        success: true,
-        urlNum: task.URLNUM,
-        storeName: task.TARGETSTORENAME,
-        message: "Crawl completed",
-      };
-    }
-  } finally {
-    await browser.disconnect();
+  // 플랫폼별 크롤링
+  if (task.URLPLATFORMS === "NAVER") {
+    return await crawlNaver(page, task, insertUrl, profileName);
+  } else if (task.URLPLATFORMS === "AUCTION") {
+    return await crawlAuction(page, task, insertUrl, profileName);
+  } else {
+    return {
+      success: true,
+      urlNum: task.URLNUM,
+      storeName: task.TARGETSTORENAME,
+      message: "Crawl completed",
+    };
   }
 }
 
 /**
  * =====================================================
- * 페이지 준비 (탭 정리)
+ * 페이지 준비 (Base URL 이동)
  * =====================================================
  */
 async function preparePage(
-  browser: any,
-  task: CrawlTask,
-  profileName: string
+  browser: CrawlerBrowser,
+  task: CrawlTask
 ): Promise<any> {
-  const pages = await browser.pages();
+  const page = await browser.getPage();
+  const currentUrl = await browser.getCurrentUrl();
+  const profileName = browser.getProfileName();
 
-  if (pages.length === 0) {
-    throw new Error("No pages available");
-  }
-
-  // 첫 번째 탭만 사용, 나머지 닫기
-  if (pages.length > 1) {
-    console.log(`[Crawler] ${profileName} - Closing ${pages.length - 1} extra tabs...`);
-    for (let i = 1; i < pages.length; i++) {
-      try {
-        await pages[i].close();
-      } catch {
-        // 무시
-      }
-    }
-  }
-
-  const page = pages[0];
-  const currentUrl = page.url();
   console.log(`[Crawler] ${profileName} - Current URL: ${currentUrl}`);
 
   // Base URL로 이동 (필요시)
@@ -404,7 +543,10 @@ async function preparePage(
       throw new Error(`naver.com 이동 실패: ${afterGotoUrl}`);
     }
 
-    await delay(2000);
+    // 랜덤 대기 (2~8초)
+    const randomDelay = Math.floor(Math.random() * 6000) + 2000;
+    console.log(`[Crawler] ${profileName} - Waiting ${randomDelay}ms before crawling...`);
+    await delay(randomDelay);
   } else if (task.URLPLATFORMS === "AUCTION" && !currentUrl.includes("auction.co.kr")) {
     console.log(`[Crawler] ${profileName} - Navigating to auction.co.kr...`);
     await page.goto("https://www.auction.co.kr/", {
@@ -421,7 +563,10 @@ async function preparePage(
       throw new Error(`auction.co.kr 이동 실패: ${afterGotoUrl}`);
     }
 
-    await delay(2000);
+    // 랜덤 대기 (2~8초)
+    const randomDelay = Math.floor(Math.random() * 6000) + 2000;
+    console.log(`[Crawler] ${profileName} - Waiting ${randomDelay}ms before crawling...`);
+    await delay(randomDelay);
   }
 
   return page;
@@ -480,9 +625,9 @@ async function navigateToTarget(
     throw new Error("Failed to create navigation link");
   }
 
-  // 클릭 전 랜덤 대기 (0~5초) - 모든 브라우저가 동시에 클릭하지 않도록 시차 분산
+  // 클릭 전 랜덤 대기 (0~5초)
   const preClickDelay = Math.floor(Math.random() * 5000);
-  await new Promise((resolve) => setTimeout(resolve, preClickDelay));
+  await delay(preClickDelay);
 
   // 클릭 및 네비게이션 대기
   const navigationPromise = page.waitForNavigation({
@@ -499,7 +644,7 @@ async function navigateToTarget(
   // URL 검증
   const finalUrl = page.url();
 
-  // Chrome 에러 페이지 체크 (네트워크 에러, 프록시 실패 등)
+  // Chrome 에러 페이지 체크
   if (finalUrl.startsWith("chrome-error://") || finalUrl === "about:blank") {
     throw new Error(`페이지 로드 실패 (네트워크/프록시 오류)`);
   }
@@ -516,7 +661,7 @@ async function navigateToTarget(
 
   // DOM 완전 로드 대기
   await page.waitForFunction(() => document.readyState === "complete", {
-    timeout: 30000,
+    timeout: 60000,
   });
 
   console.log(`[Crawler] ${profileName} - Page loaded: ${finalUrl}`);
@@ -527,7 +672,7 @@ async function navigateToTarget(
  * 유틸리티
  * =====================================================
  */
-function delay(ms: number): Promise<void> {
+async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -543,24 +688,23 @@ export function stopCrawler(): void {
 }
 
 /**
- * Task 큐에 새로운 tasks 추가
+ * Task 큐에 새로운 tasks 추가 (외부 API용)
+ * @deprecated DDD 리팩토링 후 TaskFetcher가 자동으로 Task를 관리합니다.
  */
-export function addTasks(tasks: CrawlTask[]): void {
-  addTasksToQueue(tasks);
+export function addTasks(_tasks: CrawlTask[]): void {
+  // Note: DDD 리팩토링 후 TaskQueueManager 사용
+  // Tasks are now managed internally by TaskFetcher
+  console.warn('[Crawler] addTasks() is deprecated. Tasks are managed internally by TaskFetcher.');
 }
 
 /**
- * 크롤러 현재 상태 조회 (기본)
+ * 크롤러 현재 상태 조회
  */
 export function getCrawlerStatus(): {
   isRunning: boolean;
-  queueSize: number;
-  blockedUserCount: number;
 } {
   return {
     isRunning: isRunning(),
-    queueSize: getTaskQueueSize(),
-    blockedUserCount: getBlockedUserCount(),
   };
 }
 

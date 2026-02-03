@@ -6,6 +6,37 @@ import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
 
 /**
+ * Cloudflare 블록 감지
+ */
+export async function detectCloudflareBlock(page: any): Promise<boolean> {
+  try {
+    const pageInfo = await page.evaluate(() => {
+      const bodyText = document.body?.textContent || "";
+      const hasCloudflareScript = !!window._cf_chl_opt;
+
+      return {
+        hasBlockText: bodyText.includes("사용자 활동 검토 요청") ||
+                      bodyText.includes("봇의 동작과 유사") ||
+                      bodyText.includes("Enable JavaScript and cookies to continue"),
+        hasCloudflareScript: hasCloudflareScript,
+        title: document.title || "",
+      };
+    });
+
+    const isBlocked = pageInfo.hasBlockText || pageInfo.hasCloudflareScript;
+
+    if (isBlocked) {
+      console.log(`[Auction] Cloudflare block detected - Title: ${pageInfo.title}`);
+    }
+
+    return isBlocked;
+  } catch (error: any) {
+    console.log(`[Auction] Cloudflare block check error:`, error.message);
+    return false;
+  }
+}
+
+/**
  * CAPTCHA 감지
  */
 export async function detectAuctionCaptcha(page: any): Promise<boolean> {
@@ -145,6 +176,12 @@ export async function crawlAuction(
   profileName: string
 ): Promise<CrawlResult> {
   console.log(`[Auction] ${profileName} - Starting crawl`);
+
+  // Cloudflare 블록 체크 (브라우저 재시작 필요)
+  if (await detectCloudflareBlock(page)) {
+    console.log(`[Auction] ${profileName} - Cloudflare block detected! Browser restart required.`);
+    throw new Error("Cloudflare block detected - IP change needed");
+  }
 
   // CAPTCHA 체크
   if (await detectAuctionCaptcha(page)) {

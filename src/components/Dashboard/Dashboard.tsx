@@ -20,13 +20,7 @@ interface BrowserStatusInfo {
   storeName?: string;
   message?: string;
   collectedCount?: number;
-}
-
-interface BatchDelayInfo {
-  isDelaying: boolean;
-  totalMs: number;
-  elapsedMs: number;
-  remainingMs: number;
+  proxyIp?: string;  // 현재 사용 중인 프록시 IP
 }
 
 interface CrawlerProgress {
@@ -36,10 +30,8 @@ interface CrawlerProgress {
   skippedTasks: number;  // 오류/CAPTCHA로 스킵된 Task
   pendingTasks: number;
   todayStopCount: number;
-  currentBatch: number;
   elapsedTime: number;
   browserStatuses: BrowserStatusInfo[];
-  batchDelay: BatchDelayInfo;
 }
 
 interface Session {
@@ -277,20 +269,6 @@ function Dashboard() {
     ? Math.round((totalProcessed / progress.totalTasks) * 100)
     : 0;
 
-  // 현재 배치 진행률 계산 (완료된 브라우저 / 전체 브라우저)
-  const batchBrowsers = progress?.browserStatuses || [];
-  const completedBrowsers = batchBrowsers.filter(
-    b => b.status === 'success' || b.status === 'warning' || b.status === 'error'
-  ).length;
-  const batchProgressPercent = batchBrowsers.length > 0
-    ? Math.round((completedBrowsers / batchBrowsers.length) * 100)
-    : 0;
-
-  // 배치 대기 진행률 계산
-  const batchDelayPercent = progress?.batchDelay?.isDelaying && progress.batchDelay.totalMs > 0
-    ? Math.round((progress.batchDelay.elapsedMs / progress.batchDelay.totalMs) * 100)
-    : 0;
-
   // 브라우저 상태 아이콘
   const getStatusIcon = (status: BrowserStatus) => {
     switch (status) {
@@ -401,47 +379,26 @@ function Dashboard() {
           </div>
         ) : (
           <>
-            {/* 진행률 바 (현재 배치 + 전체) */}
-            <div className="mb-6 flex gap-4">
-              {/* 현재 배치 진행률 */}
-              <div className="flex-1">
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="text-gray-600">현재 배치</span>
-                  <span className="font-semibold text-blue-600">
-                    {completedBrowsers}/{batchBrowsers.length} ({batchProgressPercent}%)
-                  </span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                  <div
-                    className={`h-3 rounded-full transition-all duration-500 ${
-                      progress.isRunning ? 'bg-blue-500' : 'bg-gray-400'
-                    }`}
-                    style={{ width: `${batchProgressPercent}%` }}
-                  />
-                </div>
+            {/* 전체 진행률 */}
+            <div className="mb-6">
+              <div className="flex justify-between text-sm mb-2">
+                <span className="text-gray-600">전체 진행률</span>
+                <span className="font-semibold text-green-600">
+                  {totalProcessed}/{progress.totalTasks} ({overallProgressPercent}%)
+                </span>
               </div>
-
-              {/* 전체 진행률 */}
-              <div className="flex-1">
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="text-gray-600">전체 진행률</span>
-                  <span className="font-semibold text-green-600">
-                    {totalProcessed}/{progress.totalTasks} ({overallProgressPercent}%)
-                  </span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                  <div
-                    className={`h-3 rounded-full transition-all duration-500 ${
-                      progress.isRunning ? 'bg-green-500' : 'bg-gray-400'
-                    }`}
-                    style={{ width: `${overallProgressPercent}%` }}
-                  />
-                </div>
+              <div className="w-full bg-gray-200 rounded-full h-3">
+                <div
+                  className={`h-3 rounded-full transition-all duration-500 ${
+                    progress.isRunning ? 'bg-green-500' : 'bg-gray-400'
+                  }`}
+                  style={{ width: `${overallProgressPercent}%` }}
+                />
               </div>
             </div>
 
             {/* 상세 통계 */}
-            <div className="grid grid-cols-6 gap-4">
+            <div className="grid grid-cols-5 gap-4">
               <div className="text-center p-4 bg-gray-50 rounded-lg">
                 <div className="text-2xl font-bold text-gray-800">{progress.totalTasks}</div>
                 <div className="text-xs text-gray-500 mt-1">전체 Task</div>
@@ -462,10 +419,6 @@ function Dashboard() {
                 <div className="text-2xl font-bold text-red-600">{progress.todayStopCount}</div>
                 <div className="text-xs text-gray-500 mt-1">todayStop</div>
               </div>
-              <div className="text-center p-4 bg-purple-50 rounded-lg">
-                <div className="text-2xl font-bold text-purple-600">{progress.currentBatch}</div>
-                <div className="text-xs text-gray-500 mt-1">현재 배치</div>
-              </div>
             </div>
 
             {/* 경과 시간 */}
@@ -474,35 +427,6 @@ function Dashboard() {
                 경과 시간: <span className="font-medium">{formatElapsedTime(progress.elapsedTime)}</span>
               </div>
             )}
-
-            {/* 배치 대기 Progress Bar (항상 표시) */}
-            <div className={`mt-6 p-4 rounded-lg border ${
-              progress.batchDelay?.isDelaying
-                ? 'bg-yellow-50 border-yellow-200'
-                : 'bg-gray-50 border-gray-200'
-            }`}>
-              <div className="flex justify-between text-sm mb-2">
-                <span className={progress.batchDelay?.isDelaying ? 'text-yellow-800 font-medium' : 'text-gray-500'}>
-                  {progress.batchDelay?.isDelaying ? '다음 배치 대기 중...' : '배치 대기'}
-                </span>
-                <span className={progress.batchDelay?.isDelaying ? 'text-yellow-600' : 'text-gray-400'}>
-                  {progress.batchDelay?.isDelaying
-                    ? `${Math.ceil(progress.batchDelay.remainingMs / 1000)}초 남음`
-                    : '-'
-                  }
-                </span>
-              </div>
-              <div className={`w-full rounded-full h-2 ${
-                progress.batchDelay?.isDelaying ? 'bg-yellow-200' : 'bg-gray-200'
-              }`}>
-                <div
-                  className={`h-2 rounded-full transition-all duration-300 ${
-                    progress.batchDelay?.isDelaying ? 'bg-yellow-500' : 'bg-gray-300'
-                  }`}
-                  style={{ width: progress.batchDelay?.isDelaying ? `${batchDelayPercent}%` : '0%' }}
-                />
-              </div>
-            </div>
 
             {/* 브라우저 상태 목록 */}
             {progress.browserStatuses && progress.browserStatuses.length > 0 && (
@@ -514,13 +438,20 @@ function Dashboard() {
                       key={browser.browserIndex}
                       className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
                     >
-                      <div className="flex items-center gap-3">
-                        <span className="text-lg">{getStatusIcon(browser.status)}</span>
-                        <span className="font-medium text-gray-800">
-                          {browser.profileName}
-                        </span>
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg flex-shrink-0">{getStatusIcon(browser.status)}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium text-gray-800">
+                            {browser.profileName}
+                          </div>
+                          {browser.proxyIp && (
+                            <div className="text-xs text-gray-500 mt-0.5">
+                              🌐 {browser.proxyIp}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-sm text-right">
+                      <div className="text-sm text-right flex-shrink-0 ml-3">
                         {browser.storeName && (
                           <div className="font-medium text-gray-700">{browser.storeName}</div>
                         )}

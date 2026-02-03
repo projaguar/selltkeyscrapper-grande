@@ -55,3 +55,21 @@ export async function updateProfile(apiKey: string, profileId: string, updateDat
     }),
   });
 }
+
+/**
+ * 프록시 IP 변경 (프록시 타입이 지원하는 경우)
+ * AdsPower는 프로필의 프록시 IP를 교체할 수 있는 API 제공
+ */
+export async function changeProxyIp(apiKey: string, profileId: string) {
+  console.log(`[AdsPower] Changing proxy IP for profile: ${profileId}`);
+  const result = await makeRequest(`/api/v1/user/change-proxy-ip?user_ids=${profileId}`, apiKey);
+  console.log(`[AdsPower] Proxy IP change result:`, JSON.stringify(result));
+  return result;
+}
+
+/**
+ * 프로필 상세 정보 조회 (프록시 설정 포함)
+ */
+export async function getProfile(apiKey: string, profileId: string) {
+  return makeRequest(`/api/v1/user/detail?user_id=${profileId}`, apiKey);
+}

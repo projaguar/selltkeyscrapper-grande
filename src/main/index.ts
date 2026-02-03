@@ -471,19 +471,43 @@ ipcMain.handle('browser-start-and-verify', async (_event, apiKey, profileId, pro
         }
       }
 
-      // 4. www.naver.com으로 이동하여 Proxy 검증
-      console.log(`[Verify] Testing proxy by navigating to www.naver.com...`);
-      let currentUrl: string;
-      try {
-        await page.goto('https://www.naver.com', {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000  // 30초 타임아웃
-        });
-        currentUrl = page.url();
-        console.log(`✅ [Verify] ${profileName} - Proxy working! Page loaded successfully at ${currentUrl}`);
-      } catch (navError: any) {
-        throw new Error(`Proxy verification failed: ${navError.message}`);
+      // 4. IP 확인 API로 Proxy 검증 (naver.com 이동 스킵)
+      console.log(`[Verify] Validating proxy using IP check API...`);
+      let actualIp: string | undefined;
+
+      // 여러 IP 확인 서비스 순차 시도
+      const ipServices = [
+        'https://api.ipify.org?format=json',
+        'https://api.my-ip.io/ip.json',
+        'https://ipapi.co/json/',
+      ];
+
+      for (const serviceUrl of ipServices) {
+        try {
+          const response = await page.evaluate(async (url: string) => {
+            const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) });
+            return await res.json();
+          }, serviceUrl);
+
+          // 응답 형식에 따라 IP 추출
+          if (response.ip) {
+            actualIp = response.ip;
+            break;
+          } else if (typeof response === 'string') {
+            actualIp = response;
+            break;
+          }
+        } catch (error: any) {
+          console.warn(`[Verify] Failed to get IP from ${serviceUrl}: ${error.message}`);
+          // 다음 서비스 시도
+        }
       }
+
+      if (!actualIp) {
+        throw new Error('Failed to retrieve actual IP from all services');
+      }
+
+      console.log(`✅ [Verify] ${profileName} - Proxy validated! IP: ${actualIp}`);
 
       // 5. 성공!
       console.log(`✅ [Verify] ${profileName} - Browser started and proxy verified successfully!`);
@@ -496,7 +520,7 @@ ipcMain.handle('browser-start-and-verify', async (_event, apiKey, profileId, pro
         success: true,
         profileId,
         profileName,
-        currentUrl,
+        proxyIp: actualIp,
         retryCount: retryCount + 1,
         message: 'Browser started successfully'
       };

@@ -6,6 +6,7 @@
 import type { CrawlTask, CrawlResult, BrowserInfo, Session } from "../types";
 import { restartBrowser } from "../browser-manager";
 import { getElapsedTime, updateBrowserStatus } from "../state";
+import { getProxyPool } from "../../proxy-pool";
 
 // 네트워크 오류로 간주할 패턴 (브라우저 재시작 + Task requeue)
 const NETWORK_ERROR_PATTERNS = [
@@ -16,6 +17,8 @@ const NETWORK_ERROR_PATTERNS = [
   "Navigation timeout",
   "Timeout waiting",
   "ETIMEDOUT",
+  "Cloudflare block detected", // Cloudflare 블록 추가
+  "IP change needed",          // IP 변경 필요
 ];
 
 interface DisconnectedResult {
@@ -76,17 +79,24 @@ export async function handleDisconnected(
 
   // Note: requeue 제거됨 - 서버에서 다음 요청 시 실패한 Task 다시 전송
   // 각 끊긴 브라우저 재시작
-  for (const { session, index } of disconnectedResults) {
+  const proxyPool = getProxyPool();
+
+  for (const { session, index, result } of disconnectedResults) {
     // 상태 업데이트: 재연결 중
     updateBrowserStatus(index, {
       status: 'reconnecting',
-      message: '네트워크 오류 - 브라우저 재시작 중...',
+      message: '네트워크 오류 - 새 IP 할당 및 재시작 중...',
     });
 
     console.log(
-      `\n[ReconnectHandler] Restarting browser: ${session.profileName}`
+      `\n[ReconnectHandler] Restarting browser with new proxy: ${session.profileName}`
     );
 
+    // restartBrowser()가 자동으로:
+    // 1. 기존 proxy를 dead로 표시
+    // 2. 새 proxy 할당
+    // 3. 브라우저 재시작
+    // 4. naver.com 검증
     const newBrowserInfo = await restartBrowser(apiKey, browsers[index]);
     browsers[index] = newBrowserInfo;
 
@@ -97,12 +107,19 @@ export async function handleDisconnected(
         message: `재연결 실패: ${newBrowserInfo.error}`,
       });
     } else {
+      // 새 proxy 정보 가져오기
+      const newProxy = session.proxyId ? proxyPool.getProxyById(session.proxyId) : undefined;
+      const newProxyIp = newProxy ? `${newProxy.ip}:${newProxy.port}` : 'Unknown';
+
       updateBrowserStatus(index, {
         status: 'idle',
         message: '브라우저 재시작 완료',
         storeName: undefined,
         collectedCount: undefined,
+        proxyIp: newProxyIp,
       });
+
+      console.log(`[ReconnectHandler] ${session.profileName} - New proxy: ${newProxyIp}`);
     }
 
     // AdsPower API rate limiting 방지
