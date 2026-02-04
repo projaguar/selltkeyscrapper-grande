@@ -260,7 +260,8 @@ async function handleBrowserRestart(
     } catch (error: any) {
       console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - ✗ 프록시 시도 ${proxyAttempt} 실패: ${error.message}`);
 
-      // 대기 없이 바로 재시도
+      // 재시작 전 잠시 대기 (1.5초)
+      await delay(1500);
     }
   }
 

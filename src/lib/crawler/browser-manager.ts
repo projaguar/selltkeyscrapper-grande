@@ -211,7 +211,8 @@ class BrowserManager {
           // 무시
         }
 
-        // 대기 없이 바로 재시도
+        // 재시작 전 잠시 대기 (1.5초)
+        await this.delay(1500);
       }
     }
 
