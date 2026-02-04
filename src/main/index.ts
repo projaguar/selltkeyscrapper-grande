@@ -7,7 +7,8 @@ import * as api from '../services/api';
 import puppeteer from 'puppeteer-core';
 import { getProxyPool } from '../lib/proxy-pool';
 import { getSessionManager } from '../lib/session-manager';
-import { processBatch, stopCrawler, addTasks, getCrawlerStatus, getCrawlerProgress } from '../lib/crawler';
+import { startCrawling, stopCrawler, getCrawlerStatus, getCrawlerProgress } from '../lib/crawler';
+import { getBrowserManager, type PreparationResult } from '../lib/crawler/browser-manager';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -92,9 +93,34 @@ ipcMain.handle('get-app-path', () => {
   return app.getPath('userData');
 });
 
-// IPC Handlers - Database
+// IPC Handlers - Database: Proxy Groups
+ipcMain.handle('db-get-proxy-groups', () => {
+  return db.getProxyGroups();
+});
+
+ipcMain.handle('db-get-proxy-groups-with-count', () => {
+  return db.getProxyGroupWithCount();
+});
+
+ipcMain.handle('db-add-proxy-group', (_event, name, maxBrowsers) => {
+  return db.addProxyGroup(name, maxBrowsers);
+});
+
+ipcMain.handle('db-update-proxy-group', (_event, id, updates) => {
+  return db.updateProxyGroup(id, updates);
+});
+
+ipcMain.handle('db-delete-proxy-group', (_event, id) => {
+  return db.deleteProxyGroup(id);
+});
+
+// IPC Handlers - Database: Proxies
 ipcMain.handle('db-get-proxies', () => {
   return db.getProxies();
+});
+
+ipcMain.handle('db-get-proxies-by-group', (_event, groupId) => {
+  return db.getProxiesByGroup(groupId);
 });
 
 ipcMain.handle('db-add-proxy', (_event, proxy) => {
@@ -105,6 +131,10 @@ ipcMain.handle('db-update-proxy', (_event, id, updates) => {
   return db.updateProxy(id, updates);
 });
 
+ipcMain.handle('db-update-proxy-group-id', (_event, proxyId, groupId) => {
+  return db.updateProxyGroup_id(proxyId, groupId);
+});
+
 ipcMain.handle('db-delete-proxy', (_event, id) => {
   return db.deleteProxy(id);
 });
@@ -113,11 +143,15 @@ ipcMain.handle('db-delete-all-proxies', () => {
   return db.deleteAllProxies();
 });
 
-ipcMain.handle('db-bulk-add-proxies', (_event, proxies) => {
-  return db.bulkAddProxies(proxies);
+ipcMain.handle('db-delete-proxies-by-group', (_event, groupId) => {
+  return db.deleteProxiesByGroup(groupId);
 });
 
-ipcMain.handle('db-import-proxies-from-file', async () => {
+ipcMain.handle('db-bulk-add-proxies', (_event, proxies, groupId) => {
+  return db.bulkAddProxies(proxies, groupId || 1);
+});
+
+ipcMain.handle('db-import-proxies-from-file', async (_event, groupId?: number) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     filters: [
@@ -155,7 +189,7 @@ ipcMain.handle('db-import-proxies-from-file', async () => {
       return { success: false, message: '유효한 프록시 정보가 없습니다.' };
     }
 
-    db.bulkAddProxies(proxies);
+    db.bulkAddProxies(proxies, groupId || 1);
     return { success: true, count: proxies.length };
   } catch (error: any) {
     return { success: false, message: error.message };
@@ -585,15 +619,56 @@ ipcMain.handle('api-get-url-list', async () => {
 });
 
 // IPC Handlers - Crawler
-ipcMain.handle('crawler-start-batch', async (_event, apiKey, sessions, insertUrl?) => {
+
+// 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
+ipcMain.handle('crawler-prepare-browsers', async (
+  _event,
+  apiKey: string,
+  profiles: Array<{ user_id: string; name: string }>
+) => {
   try {
-    console.log('[Crawler] Starting continuous batch crawling...');
-    console.log(`[Crawler] Insert URL: ${insertUrl || "(will fetch from server)"}`);
-    const results = await processBatch(apiKey, sessions, insertUrl);
-    console.log('[Crawler] Batch crawling stopped');
+    console.log('[Crawler] Preparing browsers with BrowserManager...');
+    console.log(`[Crawler] Profiles count: ${profiles.length}`);
+
+    const browserManager = getBrowserManager();
+    browserManager.setApiKey(apiKey);
+
+    // 진행 상황을 렌더러에 전달하기 위한 콜백
+    const onProgress = (index: number, total: number, result: PreparationResult) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('crawler-prepare-progress', {
+          current: index + 1,
+          total,
+          result,
+        });
+      }
+    };
+
+    const results = await browserManager.prepareBrowsers(profiles, onProgress);
+
+    const successCount = results.filter(r => r.success).length;
+    console.log(`[Crawler] Browser preparation complete: ${successCount}/${profiles.length} ready`);
+
+    return {
+      success: true,
+      results,
+      readyCount: successCount,
+    };
+  } catch (error: any) {
+    console.error('[Crawler] Failed to prepare browsers:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 크롤링 시작 (준비된 브라우저 사용)
+ipcMain.handle('crawler-start-batch', async (_event) => {
+  try {
+    console.log('[Crawler] Starting crawling with prepared browsers...');
+    const results = await startCrawling();
+    console.log('[Crawler] Crawling stopped');
     return { success: true, results };
   } catch (error: any) {
-    console.error('[Crawler] Batch crawling failed:', error);
+    console.error('[Crawler] Crawling failed:', error);
     return { success: false, error: error.message };
   }
 });
@@ -609,13 +684,15 @@ ipcMain.handle('crawler-stop', async () => {
   }
 });
 
-// Task 큐에 추가
-ipcMain.handle('crawler-add-tasks', async (_event, tasks) => {
+// 브라우저 정리 (크롤링 종료 시)
+ipcMain.handle('crawler-clear-browsers', async () => {
   try {
-    addTasks(tasks);
+    const browserManager = getBrowserManager();
+    await browserManager.clear();
+    console.log('[Crawler] All browsers cleared');
     return { success: true };
   } catch (error: any) {
-    console.error('[Crawler] Failed to add tasks:', error);
+    console.error('[Crawler] Failed to clear browsers:', error);
     return { success: false, error: error.message };
   }
 });

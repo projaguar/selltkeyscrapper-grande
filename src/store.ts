@@ -1,7 +1,20 @@
 import { create } from 'zustand';
 
+interface ProxyGroup {
+  id: number;
+  name: string;
+  max_browsers: number;
+  created_at: string;
+  // 집계 필드 (getProxyGroupWithCount에서 제공)
+  proxy_count?: number;
+  active_count?: number;
+  dead_count?: number;
+  in_use_count?: number;
+}
+
 interface Proxy {
   id: number;
+  group_id: number;
   ip: string;
   port: string;
   username?: string;
@@ -44,6 +57,13 @@ interface Store {
   apiKey: string;
   setApiKey: (apiKey: string) => void;
 
+  // 프록시 그룹 목록
+  proxyGroups: ProxyGroup[];
+  setProxyGroups: (groups: ProxyGroup[]) => void;
+  addProxyGroup: (group: ProxyGroup) => void;
+  updateProxyGroup: (id: number, updates: Partial<ProxyGroup>) => void;
+  deleteProxyGroup: (id: number) => void;
+
   // 프록시 목록
   proxies: Proxy[];
   setProxies: (proxies: Proxy[]) => void;
@@ -80,6 +100,19 @@ export const useStore = create<Store>((set) => ({
   // 설정
   apiKey: '',
   setApiKey: (apiKey) => set({ apiKey }),
+
+  // 프록시 그룹 목록
+  proxyGroups: [],
+  setProxyGroups: (proxyGroups) => set({ proxyGroups }),
+  addProxyGroup: (group) => set((state) => ({ proxyGroups: [...state.proxyGroups, group] })),
+  updateProxyGroup: (id, updates) =>
+    set((state) => ({
+      proxyGroups: state.proxyGroups.map((g) => (g.id === id ? { ...g, ...updates } : g)),
+    })),
+  deleteProxyGroup: (id) =>
+    set((state) => ({
+      proxyGroups: state.proxyGroups.filter((g) => g.id !== id),
+    })),
 
   // 프록시 목록
   proxies: [],

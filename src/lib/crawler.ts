@@ -2,17 +2,21 @@
  * Crawler 메인 플로우 (Producer-Consumer Pattern with DDD)
  *
  * 새로운 아키텍처:
+ * - BrowserManager: 브라우저 인스턴스 관리 (싱글톤)
  * - CrawlerBrowser: 도메인 객체 (브라우저/프로필 통합 관리)
  * - Producer: Task Fetcher가 백그라운드에서 Task Queue에 추가
  * - Consumer: 각 브라우저 Worker가 독립적으로 Queue에서 Task 가져와 처리
  */
 
 // 타입
-import type { CrawlTask, CrawlResult, Session } from "./crawler/types";
+import type { CrawlTask, CrawlResult } from "./crawler/types";
 export type { CrawlTask, CrawlResult, Session } from "./crawler/types";
 
 // DDD: CrawlerBrowser 도메인 객체
 import { CrawlerBrowser } from "./crawler/CrawlerBrowser";
+
+// BrowserManager 싱글톤
+import { getBrowserManager } from "./crawler/browser-manager";
 
 // Task Queue Manager
 import { TaskQueueManager } from "./crawler/task-queue";
@@ -28,6 +32,8 @@ import {
   incrementSkipped,
   registerBrowserStatusesGetter,
   unregisterBrowserStatusesGetter,
+  registerTaskQueueStatsGetter,
+  unregisterTaskQueueStatsGetter,
 } from "./crawler/state";
 
 // 모듈
@@ -205,8 +211,8 @@ async function browserWorker(
 
 /**
  * 브라우저 재시작 처리 (DDD 패턴)
- * - 새 프록시로 시작 시도
- * - 실패하면 다른 프록시로 재시도 (최대 10회 - 초기 시작과 동일)
+ * - 새 프록시로 시작 시도 (그룹별)
+ * - 실패하면 다른 프록시로 재시도 (최대 10회)
  */
 async function handleBrowserRestart(
   browser: CrawlerBrowser,
@@ -216,6 +222,8 @@ async function handleBrowserRestart(
   const maxProxyRetries = 10;
   const proxyPool = getProxyPool();
   const profileName = browser.getProfileName();
+  const groupId = browser.getProxyGroupId();
+  const groupName = browser.getProxyGroupName();
 
   for (let proxyAttempt = 1; proxyAttempt <= maxProxyRetries; proxyAttempt++) {
     browser.updateStatus('restarting', `${reason} - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}...`);
@@ -227,15 +235,18 @@ async function handleBrowserRestart(
         proxyPool.markDead(oldProxyId);
       }
 
-      // 새 Proxy 할당
-      const newProxy = proxyPool.getNextProxy();
+      // 그룹별 새 Proxy 할당
+      const newProxy = groupId !== undefined
+        ? proxyPool.getNextProxyByGroup(groupId)
+        : proxyPool.getNextProxy();
+
       if (!newProxy) {
-        console.log(`[Worker ${workerIndex}] ${profileName} - 프록시 없음`);
-        browser.updateStatus('error', 'No available proxies');
+        console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - 프록시 없음`);
+        browser.updateStatus('error', `No available proxies in group ${groupName || 'default'}`);
         return;
       }
 
-      console.log(`[Worker ${workerIndex}] ${profileName} - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}: ${newProxy.ip}:${newProxy.port}`);
+      console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}: ${newProxy.ip}:${newProxy.port}`);
 
       // 브라우저 재시작 (새 Proxy로)
       await browser.restart(newProxy, 2);
@@ -243,20 +254,18 @@ async function handleBrowserRestart(
       // Proxy를 in_use로 표시
       proxyPool.markInUse(newProxy.id);
 
-      console.log(`[Worker ${workerIndex}] ${profileName} - ✓ 재시작 완료: ${newProxy.ip}:${newProxy.port}`);
+      console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - ✓ 재시작 완료: ${newProxy.ip}:${newProxy.port}`);
       return;
 
     } catch (error: any) {
-      console.log(`[Worker ${workerIndex}] ${profileName} - ✗ 프록시 시도 ${proxyAttempt} 실패: ${error.message}`);
+      console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - ✗ 프록시 시도 ${proxyAttempt} 실패: ${error.message}`);
 
-      if (proxyAttempt < maxProxyRetries) {
-        await delay(3000);
-      }
+      // 대기 없이 바로 재시도
     }
   }
 
   // 모든 프록시 시도 실패
-  console.log(`[Worker ${workerIndex}] ${profileName} - ${maxProxyRetries}개 프록시 모두 실패`);
+  console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - ${maxProxyRetries}개 프록시 모두 실패`);
   browser.updateStatus('error', `${maxProxyRetries}개 프록시 모두 실패`);
 }
 
@@ -327,12 +336,17 @@ async function resultHandler(
 /**
  * =====================================================
  * 메인 크롤링 (Producer-Consumer Pattern with DDD)
+ * - BrowserManager에서 준비된 브라우저 사용
  * =====================================================
  */
-export async function processBatch(
-  apiKey: string,
-  sessions: Session[]
-): Promise<CrawlResult[]> {
+export async function startCrawling(): Promise<CrawlResult[]> {
+  const browserManager = getBrowserManager();
+
+  // 준비된 브라우저가 없으면 에러
+  if (!browserManager.hasBrowsers()) {
+    throw new Error("No browsers prepared. Run 'Prepare Browsers' first.");
+  }
+
   // 이미 실행 중이면 에러
   if (isRunning()) {
     throw new Error("Crawler is already running. Stop it first.");
@@ -342,100 +356,28 @@ export async function processBatch(
   setRunning(true);
   resetProgress();
 
-  const batchSize = sessions.length;
+  const browsers = browserManager.getBrowsers();
+  const batchSize = browsers.length;
 
-  console.log(`\n[Crawler] Starting with ${batchSize} browser workers (DDD Pattern)\n`);
-
-  // ========================================
-  // Step 1: CrawlerBrowser 도메인 객체 생성
-  // ========================================
-  const browsers: CrawlerBrowser[] = [];
-  const proxyPool = getProxyPool();
-
-  for (const session of sessions) {
-    const proxy = session.proxyId ? proxyPool.getProxyById(session.proxyId) : undefined;
-
-    const browser = new CrawlerBrowser({
-      profileId: session.profileId,
-      profileName: session.profileName,
-      apiKey,
-      proxy,
-    });
-
-    browsers.push(browser);
-  }
+  console.log(`\n[Crawler] Starting with ${batchSize} prepared browsers (DDD Pattern)\n`);
 
   // ========================================
-  // Step 2: 모든 브라우저 시작 (새 프록시로 재시도)
-  // ========================================
-  console.log(`[Crawler] Starting ${browsers.length} browsers...\n`);
-
-  const maxProxyRetries = 10;
-
-  for (let i = 0; i < browsers.length; i++) {
-    const browser = browsers[i];
-    let started = false;
-
-    for (let proxyAttempt = 1; proxyAttempt <= maxProxyRetries; proxyAttempt++) {
-      try {
-        // 실패 시 새 프록시 할당 (첫 시도 제외)
-        if (proxyAttempt > 1) {
-          const oldProxyId = browser.getProxyId();
-          if (oldProxyId) {
-            proxyPool.markDead(oldProxyId);
-          }
-
-          const newProxy = proxyPool.getNextProxy();
-          if (!newProxy) {
-            console.log(`[Crawler] Browser ${browser.getProfileName()} - No available proxies`);
-            break;
-          }
-
-          await browser.updateProxySettings(newProxy);
-          proxyPool.markInUse(newProxy.id);
-        }
-
-        console.log(`[Crawler] Browser ${i + 1}/${browsers.length} (${browser.getProfileName()}) - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}`);
-
-        await browser.start({ validateProxy: true, validateConnection: false });
-
-        console.log(`[Crawler] Browser ${i + 1}/${browsers.length} ✓ ${browser.getProfileName()} 시작 완료`);
-        started = true;
-        break;
-      } catch (error: any) {
-        console.log(`[Crawler] Browser ${browser.getProfileName()} - 프록시 시도 ${proxyAttempt} 실패: ${error.message}`);
-
-        // 브라우저 종료
-        try {
-          await browser.stop();
-        } catch (stopErr) {
-          // 무시
-        }
-
-        if (proxyAttempt < maxProxyRetries) {
-          await delay(3000);
-        }
-      }
-    }
-
-    if (!started) {
-      console.log(`[Crawler] Browser ${browser.getProfileName()} - ${maxProxyRetries}개 프록시 모두 실패`);
-    }
-  }
-
-  // ========================================
-  // Step 3: Task Queue Manager 생성
+  // Step 1: Task Queue Manager 생성
   // ========================================
   const taskQueue = new TaskQueueManager();
 
   // ========================================
-  // Step 4: 브라우저 상태 조회 함수 등록 (UI용)
+  // Step 2: 상태 조회 함수 등록 (UI용)
   // ========================================
-  registerBrowserStatusesGetter(() => browsers.map(b => b.getStatus()));
+  registerBrowserStatusesGetter(() => browserManager.getStatuses());
+  registerTaskQueueStatsGetter(() => ({
+    completedCount: taskQueue.completedCount(),
+    failedCount: taskQueue.failedCount(),
+  }));
 
   try {
     // ========================================
-    // Step 5: Workers 시작
+    // Step 3: Workers 시작
     // ========================================
 
     // Task Fetcher (Producer) 시작
@@ -453,9 +395,7 @@ export async function processBatch(
     const keepalivePromise = (async () => {
       while (!shouldStop()) {
         await delay(60000); // 1분마다
-        for (const browser of browsers) {
-          await browser.keepalive();
-        }
+        await browserManager.keepalive();
       }
     })();
 
@@ -475,12 +415,13 @@ export async function processBatch(
 
   } finally {
     // ========================================
-    // Step 6: 정리
+    // Step 4: 정리
     // ========================================
-    // 브라우저 상태 조회 함수 해제
+    // 상태 조회 함수 해제
     unregisterBrowserStatusesGetter();
+    unregisterTaskQueueStatsGetter();
 
-    // 브라우저는 닫지 않음 (다음 준비 시 재연결 가능)
+    // 브라우저는 닫지 않음 (BrowserManager가 관리)
     setRunning(false);
 
     const stats = taskQueue.getStats();
@@ -492,6 +433,17 @@ export async function processBatch(
 
   // 결과 반환 (빈 배열 - Worker 방식에서는 실시간 처리)
   return [];
+}
+
+/**
+ * @deprecated Use startCrawling() instead. This function is kept for backward compatibility.
+ */
+export async function processBatch(
+  _apiKey: string,
+  _sessions: any[]
+): Promise<CrawlResult[]> {
+  console.warn('[Crawler] processBatch() is deprecated. Use startCrawling() instead.');
+  return startCrawling();
 }
 
 /**
@@ -686,16 +638,6 @@ export function stopCrawler(): void {
     return;
   }
   requestStop();
-}
-
-/**
- * Task 큐에 새로운 tasks 추가 (외부 API용)
- * @deprecated DDD 리팩토링 후 TaskFetcher가 자동으로 Task를 관리합니다.
- */
-export function addTasks(_tasks: CrawlTask[]): void {
-  // Note: DDD 리팩토링 후 TaskQueueManager 사용
-  // Tasks are now managed internally by TaskFetcher
-  console.warn('[Crawler] addTasks() is deprecated. Tasks are managed internally by TaskFetcher.');
 }
 
 /**

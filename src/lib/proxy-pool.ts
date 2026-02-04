@@ -23,6 +23,10 @@ export class ProxyPool {
   private currentIndex: number = 0;
   private proxies: Proxy[] = [];
 
+  // 그룹별 프록시 관리
+  private groupProxies: Map<number, Proxy[]> = new Map();
+  private groupCurrentIndex: Map<number, number> = new Map();
+
   constructor() {
     // 앱 시작 시 이전 세션의 in_use 상태 정리
     this.initializeProxies();
@@ -144,11 +148,15 @@ export class ProxyPool {
   /**
    * Proxy 사용 해제 (active 상태로 복귀)
    */
-  releaseProxy(proxyId: number) {
+  releaseProxy(proxyId: number, groupId?: number) {
     db.updateProxy(proxyId, { status: 'active' });
     console.log(`[ProxyPool] Proxy ${proxyId} released`);
     // 목록 새로고침
     this.reload();
+    // 그룹 캐시도 갱신
+    if (groupId !== undefined) {
+      this.reloadGroup(groupId);
+    }
   }
 
   /**
@@ -202,6 +210,101 @@ export class ProxyPool {
    */
   getProxyById(proxyId: number): Proxy | undefined {
     return this.proxies.find(p => p.id === proxyId);
+  }
+
+  // ========================================
+  // 그룹별 Proxy 관리 메서드
+  // ========================================
+
+  /**
+   * 특정 그룹의 사용 가능한 proxy 목록 로드
+   */
+  loadProxiesByGroup(groupId: number): void {
+    const groupProxies = db.getProxiesByGroup(groupId) as Proxy[];
+    // active 상태의 proxy만 필터링
+    const activeProxies = groupProxies.filter(p => p.status === 'active');
+    this.groupProxies.set(groupId, activeProxies);
+
+    // 인덱스 초기화 (이전 인덱스가 없으면 0)
+    if (!this.groupCurrentIndex.has(groupId)) {
+      this.groupCurrentIndex.set(groupId, 0);
+    } else {
+      // 인덱스가 범위를 벗어나면 리셋
+      const currentIndex = this.groupCurrentIndex.get(groupId) || 0;
+      if (currentIndex >= activeProxies.length) {
+        this.groupCurrentIndex.set(groupId, 0);
+      }
+    }
+
+    console.log(`[ProxyPool] Loaded ${activeProxies.length} active proxies for group ${groupId}`);
+  }
+
+  /**
+   * 특정 그룹에서 다음 사용 가능한 proxy 반환 (Round-robin 방식)
+   */
+  getNextProxyByGroup(groupId: number): Proxy | null {
+    // 해당 그룹의 프록시가 로드되지 않았으면 로드
+    if (!this.groupProxies.has(groupId)) {
+      this.loadProxiesByGroup(groupId);
+    }
+
+    const proxies = this.groupProxies.get(groupId) || [];
+    if (proxies.length === 0) {
+      console.error(`[ProxyPool] No available proxies for group ${groupId}!`);
+      return null;
+    }
+
+    let currentIndex = this.groupCurrentIndex.get(groupId) || 0;
+    const maxAttempts = proxies.length;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      const candidateProxy = proxies[currentIndex];
+      currentIndex = (currentIndex + 1) % proxies.length;
+      this.groupCurrentIndex.set(groupId, currentIndex);
+      attempts++;
+
+      // DB에서 최신 상태 확인
+      const allProxies = db.getProxiesByGroup(groupId) as Proxy[];
+      const currentProxy = allProxies.find(p => p.id === candidateProxy.id);
+
+      // 실제로 'active' 상태인 경우에만 반환
+      if (currentProxy && currentProxy.status === 'active') {
+        console.log(`[ProxyPool] Assigned proxy ${currentProxy.ip}:${currentProxy.port} from group ${groupId} (attempt ${attempts}/${maxAttempts})`);
+        return currentProxy;
+      }
+
+      console.log(`[ProxyPool] Skipping proxy ${candidateProxy.ip}:${candidateProxy.port} in group ${groupId} (status: ${currentProxy?.status || 'not found'})`);
+    }
+
+    console.error(`[ProxyPool] No active proxies available for group ${groupId} after checking all candidates!`);
+    return null;
+  }
+
+  /**
+   * 특정 그룹의 proxy 목록 새로고침
+   */
+  reloadGroup(groupId: number): void {
+    this.loadProxiesByGroup(groupId);
+  }
+
+  /**
+   * 특정 그룹의 사용 가능한 proxy 개수
+   */
+  getAvailableCountByGroup(groupId: number): number {
+    if (!this.groupProxies.has(groupId)) {
+      this.loadProxiesByGroup(groupId);
+    }
+    return this.groupProxies.get(groupId)?.length || 0;
+  }
+
+  /**
+   * 모든 그룹 프록시 캐시 초기화
+   */
+  clearGroupCache(): void {
+    this.groupProxies.clear();
+    this.groupCurrentIndex.clear();
+    console.log('[ProxyPool] Group cache cleared');
   }
 }
 

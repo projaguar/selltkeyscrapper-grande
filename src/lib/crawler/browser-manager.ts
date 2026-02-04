@@ -1,427 +1,305 @@
 /**
- * 브라우저 관리 모듈
- * - 브라우저 초기화/정리
- * - WebSocket Keepalive
+ * BrowserManager - CrawlerBrowser 인스턴스 관리 (싱글톤 - DDD 패턴)
+ *
+ * 역할:
+ * - CrawlerBrowser 인스턴스들의 생명주기 관리
+ * - 브라우저 준비 (그룹별 프록시 할당 + 테스트)
+ * - 크롤링에서 재사용할 브라우저 제공
  */
 
-import puppeteer from "puppeteer-core";
-import { adsPowerQueue } from "./adspower-queue";
-import type { Session, BrowserInfo } from "./types";
+import { CrawlerBrowser, type BrowserStatusInfo } from "./CrawlerBrowser";
 import { getProxyPool } from "../proxy-pool";
-import * as adspower from "../../services/adspower";
+import * as db from "../../database/sqlite";
 
-// 재시작 중인 브라우저 추적 (중복 방지)
-const restartingBrowsers: Set<string> = new Set();
-
-/**
- * 브라우저 시작 및 검증 (공통 로직)
- * - AdsPower 브라우저 시작
- * - Puppeteer 연결
- * - 탭 정리 (1개만 유지)
- * - naver.com 접속하여 IP 검증 (선택적)
- */
-async function startAndValidateBrowser(
-  apiKey: string,
-  profileId: string,
-  profileName: string,
-  validateIp: boolean = false
-): Promise<{ browser: any; browserData: any } | { error: string }> {
-  try {
-    // 1. AdsPower 브라우저 시작
-    console.log(`[BrowserManager] ${profileName} - Starting browser...`);
-    const startResult = await adsPowerQueue.startBrowser(apiKey, profileId);
-
-    if (startResult.code !== 0) {
-      throw new Error(`AdsPower API failed: ${startResult.msg} (code: ${startResult.code})`);
-    }
-
-    const wsUrl = startResult.data?.ws?.puppeteer;
-    if (!wsUrl) {
-      console.error(`[BrowserManager] ${profileName} - AdsPower response data:`, JSON.stringify(startResult.data, null, 2));
-      throw new Error("WebSocket URL not found in response");
-    }
-
-    // 2. Puppeteer 연결
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: wsUrl,
-      defaultViewport: null,
-    });
-
-    // 3. 브라우저 초기화 대기 및 탭 정리
-    console.log(`[BrowserManager] ${profileName} - Waiting for browser initialization...`);
-    await new Promise((resolve) => setTimeout(resolve, 2000)); // 브라우저 초기화 대기 (2초)
-
-    const pages = await browser.pages();
-    console.log(`[BrowserManager] ${profileName} - Found ${pages.length} tabs`);
-
-    if (pages.length === 0) {
-      throw new Error("No tabs found - browser may have closed unexpectedly");
-    }
-
-    let mainPage: any;
-
-    if (pages.length > 1) {
-      // 탭이 여러 개면 첫 번째만 남기고 나머지 닫기
-      console.log(`[BrowserManager] ${profileName} - Closing ${pages.length - 1} extra tabs...`);
-
-      const closePromises = pages.slice(1).map((page: any) =>
-        page.close().catch((err: any) => {
-          console.warn(`[BrowserManager] Failed to close tab: ${err.message}`);
-        })
-      );
-      await Promise.all(closePromises);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      console.log(`[BrowserManager] ${profileName} - Kept first tab, closed ${pages.length - 1} extras`);
-
-      mainPage = pages[0];
-    } else {
-      // 탭이 정확히 1개면 그대로 사용
-      console.log(`[BrowserManager] ${profileName} - Using existing tab`);
-      mainPage = pages[0];
-    }
-
-    // 4. naver.com 접속하여 IP 유효성 검증 (선택적)
-    if (validateIp) {
-      console.log(`[BrowserManager] ${profileName} - Navigating to naver.com for IP validation...`);
-
-      await mainPage.goto('https://www.naver.com', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-
-      // 페이지 로드 안정화 대기
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      console.log(`[BrowserManager] ${profileName} - Successfully validated IP with naver.com`);
-    } else {
-      console.log(`[BrowserManager] ${profileName} - Skipping IP validation (will validate on first crawl)`);
-    }
-
-    return {
-      browser,
-      browserData: startResult.data,
-    };
-  } catch (error: any) {
-    return {
-      error: error.message,
-    };
-  }
+// 프로필 정보
+interface Profile {
+  user_id: string;
+  name: string;
 }
 
-/**
- * 모든 브라우저 순차 시작 및 연결
- * (AdsPower API rate limit: 초당 2 요청)
- */
-export async function initializeBrowsers(
-  apiKey: string,
-  sessions: Session[]
-): Promise<BrowserInfo[]> {
-  console.log(
-    `[BrowserManager] Starting ${sessions.length} browsers sequentially...`
-  );
-
-  const browsers: BrowserInfo[] = [];
-
-  for (let i = 0; i < sessions.length; i++) {
-    const session = sessions[i];
-
-    // 공통 로직: 브라우저 시작 (초기 시작 시에는 IP 검증 스킵 - preparePage에서 자동 검증)
-    const result = await startAndValidateBrowser(apiKey, session.profileId, session.profileName, false);
-
-    if ('error' in result) {
-      console.error(
-        `[BrowserManager] Failed to start browser for ${session.profileName}: ${result.error}`
-      );
-      browsers.push({
-        session,
-        browser: null,
-        error: result.error,
-      });
-    } else {
-      browsers.push({
-        session,
-        browser: result.browser,
-        browserData: result.browserData,
-        error: null,
-      });
-
-      console.log(
-        `[BrowserManager] Browser started for ${session.profileName} (${i + 1}/${sessions.length})`
-      );
-    }
-  }
-
-  console.log(`[BrowserManager] All ${browsers.length} browsers ready\n`);
-  return browsers;
+// 준비 결과
+export interface PreparationResult {
+  success: boolean;
+  profileId: string;
+  profileName: string;
+  proxyGroupName?: string;
+  proxyIp?: string;
+  error?: string;
 }
 
-/**
- * 모든 브라우저 정리
- */
-export async function cleanupBrowsers(
-  apiKey: string,
-  browsers: BrowserInfo[]
-): Promise<void> {
-  console.log(`\n[BrowserManager] Cleaning up ${browsers.length} browsers...\n`);
+class BrowserManager {
+  private browsers: Map<string, CrawlerBrowser> = new Map();
+  private apiKey: string = "";
 
-  for (let i = 0; i < browsers.length; i++) {
-    const browserInfo = browsers[i];
-    if (!browserInfo) continue;
+  /**
+   * API Key 설정
+   */
+  setApiKey(apiKey: string): void {
+    this.apiKey = apiKey;
+  }
 
-    // Puppeteer 연결 끊기
-    if (browserInfo.browser) {
+  /**
+   * API Key 가져오기
+   */
+  getApiKey(): string {
+    return this.apiKey;
+  }
+
+  /**
+   * 모든 브라우저 준비 (그룹별 프록시 할당 + 테스트)
+   */
+  async prepareBrowsers(
+    profiles: Profile[],
+    onProgress?: (index: number, total: number, result: PreparationResult) => void
+  ): Promise<PreparationResult[]> {
+    const results: PreparationResult[] = [];
+    const proxyPool = getProxyPool();
+
+    // 기존 브라우저 정리
+    await this.clear();
+
+    // 프록시 그룹 목록 조회
+    const proxyGroups = db.getProxyGroups() as { id: number; name: string; max_browsers: number }[];
+    console.log(`[BrowserManager] Found ${proxyGroups.length} proxy groups`);
+
+    if (proxyGroups.length === 0) {
+      console.error("[BrowserManager] No proxy groups found!");
+      return profiles.map((p) => ({
+        success: false,
+        profileId: p.user_id,
+        profileName: p.name,
+        error: "프록시 그룹이 없습니다",
+      }));
+    }
+
+    // 그룹별 브라우저 할당 계산
+    const groupAssignments: { groupId: number; groupName: string }[] = [];
+    let remainingBrowsers = profiles.length;
+    let groupIndex = 0;
+
+    while (remainingBrowsers > 0 && groupIndex < proxyGroups.length) {
+      const group = proxyGroups[groupIndex];
+      const assignCount = Math.min(group.max_browsers, remainingBrowsers);
+
+      for (let i = 0; i < assignCount; i++) {
+        groupAssignments.push({
+          groupId: group.id,
+          groupName: group.name,
+        });
+      }
+
+      remainingBrowsers -= assignCount;
+      groupIndex++;
+    }
+
+    // 남은 브라우저가 있으면 마지막 그룹에 할당
+    if (remainingBrowsers > 0) {
+      const lastGroup = proxyGroups[proxyGroups.length - 1];
+      for (let i = 0; i < remainingBrowsers; i++) {
+        groupAssignments.push({
+          groupId: lastGroup.id,
+          groupName: lastGroup.name,
+        });
+      }
+    }
+
+    console.log(`[BrowserManager] Group assignments: ${groupAssignments.map((g) => g.groupName).join(", ")}`);
+
+    // 각 프로필에 대해 브라우저 준비
+    for (let i = 0; i < profiles.length; i++) {
+      const profile = profiles[i];
+      const assignment = groupAssignments[i];
+
+      console.log(`[BrowserManager] Preparing browser ${i + 1}/${profiles.length}: ${profile.name} [${assignment.groupName}]`);
+
+      // CrawlerBrowser 생성
+      const browser = new CrawlerBrowser({
+        profileId: profile.user_id,
+        profileName: profile.name,
+        apiKey: this.apiKey,
+        proxyGroupId: assignment.groupId,
+        proxyGroupName: assignment.groupName,
+      });
+
+      // 프록시 할당 + 브라우저 시작 + 테스트 (최대 10회 재시도)
+      const result = await this.prepareWithRetry(browser, assignment.groupId, assignment.groupName, proxyPool);
+
+      results.push(result);
+
+      // 성공 시 저장
+      if (result.success) {
+        this.browsers.set(profile.user_id, browser);
+      }
+
+      // 진행 상황 콜백
+      if (onProgress) {
+        onProgress(i, profiles.length, result);
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    console.log(`[BrowserManager] Preparation complete: ${successCount}/${profiles.length} browsers ready`);
+
+    return results;
+  }
+
+  /**
+   * 프록시 재시도 로직 포함 브라우저 준비
+   */
+  private async prepareWithRetry(
+    browser: CrawlerBrowser,
+    groupId: number,
+    groupName: string,
+    proxyPool: ReturnType<typeof getProxyPool>
+  ): Promise<PreparationResult> {
+    const maxRetries = 10;
+    const profileName = browser.getProfileName();
+    const profileId = browser.getProfileId();
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await browserInfo.browser.disconnect();
-        console.log(`[BrowserManager] Browser ${i + 1} disconnected`);
-      } catch (error: any) {
-        console.error(
-          `[BrowserManager] Failed to disconnect browser ${i + 1}: ${error.message}`
-        );
-      }
-    }
+        // 그룹에서 프록시 가져오기
+        const proxy = proxyPool.getNextProxyByGroup(groupId);
 
-    // AdsPower 브라우저 중지
-    try {
-      await adsPowerQueue.stopBrowser(apiKey, browserInfo.session.profileId);
-      console.log(`[BrowserManager] Browser ${i + 1} stopped`);
-    } catch (error: any) {
-      console.error(
-        `[BrowserManager] Failed to stop browser ${i + 1}: ${error.message}`
-      );
-    }
-  }
+        if (!proxy) {
+          console.log(`[BrowserManager] ${profileName} - No available proxies in group ${groupName}`);
+          return {
+            success: false,
+            profileId,
+            profileName,
+            proxyGroupName: groupName,
+            error: `그룹 "${groupName}"에 사용 가능한 프록시가 없습니다`,
+          };
+        }
 
-  console.log(`\n[BrowserManager] Cleanup completed\n`);
-}
+        console.log(`[BrowserManager] ${profileName} [${groupName}] - 프록시 시도 ${attempt}/${maxRetries}: ${proxy.ip}:${proxy.port}`);
 
-/**
- * WebSocket Keepalive: 모든 브라우저에 간단한 작업 수행
- */
-export async function keepaliveBrowsers(browsers: BrowserInfo[]): Promise<void> {
-  console.log(
-    `[BrowserManager] Performing WebSocket keepalive on ${browsers.length} browsers...`
-  );
+        // 프록시 설정 업데이트
+        await browser.updateProxySettings(proxy);
 
-  for (let i = 0; i < browsers.length; i++) {
-    const browserInfo = browsers[i];
-    if (browserInfo.error || !browserInfo.browser) {
-      continue;
-    }
+        // 프록시 in_use로 표시
+        proxyPool.markInUse(proxy.id);
 
-    try {
-      // 페이지 목록 가져오기 (WebSocket 통신 발생)
-      await browserInfo.browser.pages();
-    } catch (error: any) {
-      console.log(
-        `[BrowserManager] Keepalive failed for browser ${i + 1} (${browserInfo.session.profileName}): ${error.message}`
-      );
-    }
-  }
+        // 탭 설정 초기화
+        await browser.clearTabSettings();
 
-  console.log(`[BrowserManager] Keepalive completed\n`);
-}
+        // 브라우저 시작 + 프록시 테스트
+        await browser.start({ validateProxy: true, validateConnection: false });
 
-/**
- * 특정 브라우저 재시작 (프로파일 유지)
- * - 최대 3회 재시도 (지수 백오프)
- * - 중복 재시작 방지 (이미 재시작 중이면 대기)
- * - ProxyPool에서 새로운 proxy 할당
- * - naver.com 접속하여 IP 유효성 검증
- */
-export async function restartBrowser(
-  apiKey: string,
-  browserInfo: BrowserInfo
-): Promise<BrowserInfo> {
-  const { session } = browserInfo;
-  const MAX_RETRIES = 3;
-
-  // 이미 재시작 중인 브라우저면 대기
-  if (restartingBrowsers.has(session.profileId)) {
-    console.log(`[BrowserManager] ${session.profileName} is already restarting, waiting...`);
-
-    // 최대 30초 대기
-    for (let i = 0; i < 30; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (!restartingBrowsers.has(session.profileId)) {
-        console.log(`[BrowserManager] ${session.profileName} restart completed by another worker`);
-        return browserInfo; // 다른 Worker가 이미 재시작 완료
-      }
-    }
-
-    console.warn(`[BrowserManager] ${session.profileName} restart timeout after 30s wait`);
-    return browserInfo;
-  }
-
-  // 재시작 시작 표시
-  restartingBrowsers.add(session.profileId);
-  console.log(`[BrowserManager] Restarting browser: ${session.profileName}`);
-
-  // 기존 브라우저 정리
-  if (browserInfo.browser) {
-    try {
-      await browserInfo.browser.disconnect();
-    } catch {
-      // 이미 끊겼으므로 무시
-    }
-  }
-
-  // AdsPower 브라우저 중지 시도
-  try {
-    await adsPowerQueue.stopBrowser(apiKey, session.profileId);
-    console.log(`[BrowserManager] ${session.profileName} - Browser stopped`);
-  } catch {
-    console.log(`[BrowserManager] ${session.profileName} - Browser already stopped`);
-  }
-
-  // 브라우저 완전 종료 대기
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  // ========================================
-  // ProxyPool에서 새로운 Proxy 할당
-  // ========================================
-  const proxyPool = getProxyPool();
-
-  // 기존 proxy를 dead로 표시 (블록/네트워크 오류로 재시작하는 경우)
-  if (session.proxyId) {
-    proxyPool.markDead(session.proxyId);
-    console.log(`[BrowserManager] ${session.profileName} - Marked old proxy ${session.proxyId} as dead`);
-  }
-
-  // 새 proxy 가져오기
-  const newProxy = proxyPool.getNextProxy();
-  if (!newProxy) {
-    console.error(`[BrowserManager] ${session.profileName} - No available proxies!`);
-    restartingBrowsers.delete(session.profileId);
-    return {
-      session,
-      browser: null,
-      browserData: null,
-      error: "No available proxies in pool",
-    };
-  }
-
-  console.log(`[BrowserManager] ${session.profileName} - Assigning new proxy: ${newProxy.ip}:${newProxy.port}`);
-
-  // AdsPower 프로필에 새 proxy 설정 업데이트
-  const updateData: any = {
-    user_proxy_config: {
-      proxy_soft: 'other',
-      proxy_type: 'http',
-      proxy_host: newProxy.ip,
-      proxy_port: newProxy.port,
-    },
-    // 탭 설정 초기화 (빈 탭만 열림)
-    domain_name: '',
-    open_urls: [],
-    tab_urls: [],
-  };
-
-  // username/password가 있으면 추가
-  if (newProxy.username) {
-    updateData.user_proxy_config.proxy_user = newProxy.username;
-  }
-  if (newProxy.password) {
-    updateData.user_proxy_config.proxy_password = newProxy.password;
-  }
-
-  try {
-    const updateResult = await adspower.updateProfile(apiKey, session.profileId, updateData);
-    if (updateResult.code !== 0) {
-      console.error(`[BrowserManager] ${session.profileName} - Failed to update proxy: ${updateResult.msg}`);
-      proxyPool.releaseProxy(newProxy.id);
-      restartingBrowsers.delete(session.profileId);
-      return {
-        session,
-        browser: null,
-        browserData: null,
-        error: `Proxy update failed: ${updateResult.msg}`,
-      };
-    }
-    console.log(`[BrowserManager] ${session.profileName} - Proxy updated successfully`);
-  } catch (error: any) {
-    console.error(`[BrowserManager] ${session.profileName} - Proxy update error: ${error.message}`);
-    proxyPool.releaseProxy(newProxy.id);
-    restartingBrowsers.delete(session.profileId);
-    return {
-      session,
-      browser: null,
-      browserData: null,
-      error: `Proxy update error: ${error.message}`,
-    };
-  }
-
-  // Proxy 적용 안정화 대기
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  // 재시작 재시도 로직
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    console.log(`[BrowserManager] ${session.profileName} - Start attempt ${attempt}/${MAX_RETRIES}`);
-
-    // 공통 로직: 브라우저 시작 및 IP 검증 (재시작 시에는 새 proxy 즉시 확인 필요)
-    const result = await startAndValidateBrowser(apiKey, session.profileId, session.profileName, true);
-
-    if ('error' in result) {
-      console.error(
-        `[BrowserManager] ${session.profileName} - Attempt ${attempt} failed: ${result.error}`
-      );
-
-      // 마지막 시도가 아니면 지수 백오프 대기
-      if (attempt < MAX_RETRIES) {
-        const backoffMs = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
-        console.log(`[BrowserManager] ${session.profileName} - Waiting ${backoffMs}ms before retry...`);
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
-      } else {
-        // 모든 재시도 실패
-        console.error(
-          `[BrowserManager] ${session.profileName} - All ${MAX_RETRIES} restart attempts failed`
-        );
-
-        // 할당받은 proxy 해제
-        proxyPool.releaseProxy(newProxy.id);
-
-        // 재시작 완료 표시 제거
-        restartingBrowsers.delete(session.profileId);
+        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✓ 준비 완료: ${proxy.ip}:${proxy.port}`);
 
         return {
-          session,
-          browser: null,
-          browserData: null,
-          error: `Restart failed after ${MAX_RETRIES} attempts: ${result.error}`,
+          success: true,
+          profileId,
+          profileName,
+          proxyGroupName: groupName,
+          proxyIp: `${proxy.ip}:${proxy.port}`,
         };
+      } catch (error: any) {
+        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✗ 시도 ${attempt} 실패: ${error.message}`);
+
+        // 기존 프록시 dead 처리
+        const oldProxyId = browser.getProxyId();
+        if (oldProxyId) {
+          proxyPool.markDead(oldProxyId);
+        }
+
+        // 브라우저 종료
+        try {
+          await browser.stop();
+        } catch {
+          // 무시
+        }
+
+        // 대기 없이 바로 재시도
       }
-    } else {
-      // 성공
-      console.log(`[BrowserManager] ${session.profileName} - Browser restarted successfully on attempt ${attempt}`);
+    }
 
-      // Session에 새 proxy 정보 업데이트
-      session.proxyId = newProxy.id;
+    return {
+      success: false,
+      profileId,
+      profileName,
+      proxyGroupName: groupName,
+      error: `${maxRetries}개 프록시 모두 실패`,
+    };
+  }
 
-      // 새 proxy를 in_use로 표시
-      proxyPool.markInUse(newProxy.id);
+  /**
+   * 준비된 브라우저 목록 반환
+   */
+  getBrowsers(): CrawlerBrowser[] {
+    return Array.from(this.browsers.values());
+  }
 
-      // 재시작 완료 표시 제거
-      restartingBrowsers.delete(session.profileId);
+  /**
+   * 특정 브라우저 조회
+   */
+  getBrowser(profileId: string): CrawlerBrowser | undefined {
+    return this.browsers.get(profileId);
+  }
 
-      return {
-        session,
-        browser: result.browser,
-        browserData: result.browserData,
-        error: null,
-      };
+  /**
+   * 준비된 브라우저 수
+   */
+  getReadyCount(): number {
+    return this.browsers.size;
+  }
+
+  /**
+   * 브라우저 상태 목록 조회
+   */
+  getStatuses(): BrowserStatusInfo[] {
+    return this.getBrowsers().map((b) => b.getStatus());
+  }
+
+  /**
+   * 모든 브라우저 정리 (크롤링 종료 시)
+   */
+  async clear(): Promise<void> {
+    console.log(`[BrowserManager] Clearing ${this.browsers.size} browsers...`);
+
+    for (const browser of this.browsers.values()) {
+      try {
+        await browser.stop();
+      } catch {
+        // 무시
+      }
+    }
+
+    this.browsers.clear();
+  }
+
+  /**
+   * 브라우저 존재 여부
+   */
+  hasBrowsers(): boolean {
+    return this.browsers.size > 0;
+  }
+
+  /**
+   * Keepalive: 모든 브라우저에 WebSocket 유지
+   */
+  async keepalive(): Promise<void> {
+    for (const browser of this.browsers.values()) {
+      try {
+        await browser.keepalive();
+      } catch {
+        // 무시
+      }
     }
   }
 
-  // 이 코드에 도달하지 않지만 TypeScript를 위해
-  // 재시작 완료 표시 제거
-  restartingBrowsers.delete(session.profileId);
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
 
-  // 할당받은 proxy 해제 (안전장치)
-  proxyPool.releaseProxy(newProxy.id);
+// 싱글톤 인스턴스
+let instance: BrowserManager | null = null;
 
-  return {
-    session,
-    browser: null,
-    browserData: null,
-    error: "Unknown restart failure",
-  };
+export function getBrowserManager(): BrowserManager {
+  if (!instance) {
+    instance = new BrowserManager();
+  }
+  return instance;
 }

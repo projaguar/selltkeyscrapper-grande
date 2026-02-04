@@ -33,6 +33,7 @@ export interface BrowserStatusInfo {
   profileId: string;
   profileName: string;
   status: BrowserStatus;
+  proxyGroupName?: string;
   proxyIp?: string;
   storeName?: string;
   message?: string;
@@ -45,6 +46,8 @@ export interface CrawlerBrowserConfig {
   profileName: string;
   apiKey: string;
   proxy?: Proxy;
+  proxyGroupId?: number;
+  proxyGroupName?: string;
 }
 
 // ========================================
@@ -66,6 +69,10 @@ export class CrawlerBrowser {
   private proxyPort?: string;
   private proxyUsername?: string;
   private proxyPassword?: string;
+
+  // Proxy Group 정보
+  private proxyGroupId?: number;
+  private proxyGroupName?: string;
 
   // Browser 인스턴스
   private browser?: any; // puppeteer.Browser
@@ -95,6 +102,13 @@ export class CrawlerBrowser {
 
     if (config.proxy) {
       this.assignProxy(config.proxy);
+    }
+
+    if (config.proxyGroupId !== undefined) {
+      this.proxyGroupId = config.proxyGroupId;
+    }
+    if (config.proxyGroupName) {
+      this.proxyGroupName = config.proxyGroupName;
     }
   }
 
@@ -216,8 +230,8 @@ export class CrawlerBrowser {
       // 4. 탭 정리 (1개만 유지)
       await this.cleanupTabs();
 
-      // 5. 이미지/미디어 차단 설정 (성능 최적화)
-      await this.setupResourceBlocking();
+      // 5. 이미지/미디어 차단 설정 (성능 최적화) - 비활성화
+      // await this.setupResourceBlocking();
 
       // 6. AdsPower에 설정된 실제 프록시 정보 동기화
       try {
@@ -385,6 +399,7 @@ export class CrawlerBrowser {
   /**
    * 프록시 검증 (프록시가 작동하는지 확인 - IP를 가져올 수 있는지만 체크)
    * IP는 UI 표시용으로만 사용
+   * 전체 검증 과정에 10초 타임아웃 적용
    */
   async validateProxy(): Promise<{
     valid: boolean;
@@ -395,6 +410,31 @@ export class CrawlerBrowser {
       return { valid: false, error: "Browser not started" };
     }
 
+    const TIMEOUT_MS = 10000; // 10초 타임아웃
+
+    try {
+      // 전체 검증 과정에 타임아웃 적용
+      const result = await Promise.race([
+        this.doValidateProxy(),
+        new Promise<{ valid: false; error: string }>((resolve) =>
+          setTimeout(() => resolve({ valid: false, error: "Proxy validation timeout (10s)" }), TIMEOUT_MS)
+        ),
+      ]);
+
+      return result;
+    } catch (error: any) {
+      return { valid: false, error: error.message };
+    }
+  }
+
+  /**
+   * 실제 프록시 검증 로직 (내부용)
+   */
+  private async doValidateProxy(): Promise<{
+    valid: boolean;
+    actualIp?: string;
+    error?: string;
+  }> {
     try {
       const page = await this.getPage();
 
@@ -577,6 +617,7 @@ export class CrawlerBrowser {
       profileId: this.profileId,
       profileName: this.profileName,
       status: this.status,
+      proxyGroupName: this.proxyGroupName,
       proxyIp: this.proxyIp ? `${this.proxyIp}:${this.proxyPort}` : undefined,
       storeName: this.storeName,
       message: this.message,
@@ -626,8 +667,24 @@ export class CrawlerBrowser {
     return this.proxyIp;
   }
 
+  getProxyGroupId(): number | undefined {
+    return this.proxyGroupId;
+  }
+
+  getProxyGroupName(): string | undefined {
+    return this.proxyGroupName;
+  }
+
   getBrowser(): any {
     return this.browser;
+  }
+
+  /**
+   * Proxy Group 설정
+   */
+  setProxyGroup(groupId: number, groupName: string): void {
+    this.proxyGroupId = groupId;
+    this.proxyGroupName = groupName;
   }
 
   // ========================================

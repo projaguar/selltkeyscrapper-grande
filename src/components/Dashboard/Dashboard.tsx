@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useStore } from '../../store';
 import { Button } from '@/components/ui/button';
 
@@ -11,6 +11,7 @@ type BrowserStatus =
   | 'waiting'        // 배치 대기
   | 'recreating'     // CAPTCHA로 프로필 재생성 중
   | 'reconnecting'   // 연결 끊김 복구 중
+  | 'restarting'     // 재시작 중
   | 'preparing';     // 브라우저 준비 중
 
 interface BrowserStatusInfo {
@@ -20,7 +21,9 @@ interface BrowserStatusInfo {
   storeName?: string;
   message?: string;
   collectedCount?: number;
+  proxyGroupName?: string;  // 프록시 그룹 이름
   proxyIp?: string;  // 현재 사용 중인 프록시 IP
+  error?: string;
 }
 
 interface CrawlerProgress {
@@ -34,21 +37,23 @@ interface CrawlerProgress {
   browserStatuses: BrowserStatusInfo[];
 }
 
-interface Session {
+interface PreparationResult {
+  success: boolean;
   profileId: string;
   profileName: string;
-  proxyId: number;
-  proxyIp: string;
-  proxyPort: number;
+  proxyGroupName?: string;
+  proxyIp?: string;
+  error?: string;
 }
 
 function Dashboard() {
   const { apiKey, proxies, profiles } = useStore();
   const [progress, setProgress] = useState<CrawlerProgress | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [isPreparing, setIsPreparing] = useState(false);
   const [isCrawling, setIsCrawling] = useState(false);
+  const [readyBrowserCount, setReadyBrowserCount] = useState(0);
   const [preparingStatuses, setPreparingStatuses] = useState<BrowserStatusInfo[]>([]);
+  const removeProgressListenerRef = useRef<(() => void) | null>(null);
 
   // 크롤링 진행 상태 주기적 조회
   useEffect(() => {
@@ -76,36 +81,31 @@ function Dashboard() {
   useEffect(() => {
     if (progress) {
       // 크롤링이 중지되면 세션 정보 초기화
-      // (브라우저가 닫혔으므로 세션이 더 이상 유효하지 않음)
       if (isCrawling && !progress.isRunning) {
-        console.log('[Dashboard] Crawling stopped, clearing sessions...');
-        setSessions([]);
+        console.log('[Dashboard] Crawling stopped');
+        setReadyBrowserCount(0);
       }
       setIsCrawling(progress.isRunning);
     }
   }, [progress?.isRunning, isCrawling]);
 
-  // 세션 목록 로드
-  const loadSessions = async () => {
-    if (!apiKey) return;
-    try {
-      const result = await window.electronAPI.session.getAll(apiKey);
-      if (result.success) {
-        setSessions(result.sessions || []);
+  // 컴포넌트 언마운트 시 이벤트 리스너 정리
+  useEffect(() => {
+    return () => {
+      if (removeProgressListenerRef.current) {
+        removeProgressListenerRef.current();
       }
-    } catch (error) {
-      console.error('[Dashboard] Failed to load sessions:', error);
-    }
-  };
+    };
+  }, []);
 
-  // 브라우저 준비 (Proxy 검증 + 브라우저 시작)
+  // 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
   const handlePrepareBrowsers = async () => {
     if (profiles.length === 0) {
       alert('⚠️ 시작할 프로필이 없습니다.');
       return;
     }
 
-    setIsVerifying(true);
+    setIsPreparing(true);
 
     // 초기 준비 상태 설정 (모든 프로필 대기 중)
     const initialStatuses: BrowserStatusInfo[] = profiles.map((profile, index) => ({
@@ -117,117 +117,80 @@ function Dashboard() {
     setPreparingStatuses(initialStatuses);
 
     try {
-      // 1. 모든 프로필에 Proxy 할당
-      console.log('\n🔗 Step 1: Assigning proxies to all profiles...');
+      // 진행 상황 이벤트 리스너 등록
+      const removeListener = window.electronAPI.crawler.onPrepareProgress((data) => {
+        const { current, total, result } = data;
+        console.log(`[Dashboard] Prepare progress: ${current}/${total}`, result);
 
-      // 모든 프로필 상태를 "Proxy 할당 중"으로 업데이트
-      setPreparingStatuses(prev => prev.map(s => ({
-        ...s,
-        status: 'preparing' as BrowserStatus,
-        message: 'Proxy 할당 중...',
-      })));
-
-      const assignResult = await window.electronAPI.session.assignProxyToAll(apiKey);
-      if (!assignResult.success) {
-        setPreparingStatuses(prev => prev.map(s => ({
-          ...s,
-          status: 'error' as BrowserStatus,
-          message: 'Proxy 할당 실패',
-        })));
-        alert(`❌ Proxy 할당 실패\n${assignResult.error || '알 수 없는 오류'}`);
-        setIsVerifying(false);
-        return;
-      }
-
-      // 2. 각 프로필 검증 및 시작
-      console.log('\n🔍 Step 2: Verifying and starting browsers...');
-      let successCount = 0;
-      let failCount = 0;
-
-      for (let i = 0; i < profiles.length; i++) {
-        const profile = profiles[i];
-
-        // 현재 프로필 상태를 "브라우저 시작 중"으로 업데이트
-        setPreparingStatuses(prev => prev.map((s, idx) =>
-          idx === i
-            ? { ...s, status: 'preparing' as BrowserStatus, message: '브라우저 시작 중...' }
-            : s
-        ));
-
-        try {
-          const result = await window.electronAPI.browser.startAndVerify(
-            apiKey,
-            profile.user_id,
-            profile.name,
-            3
-          );
-          if (result.success) {
-            successCount++;
-            // 성공 상태로 업데이트
-            setPreparingStatuses(prev => prev.map((s, idx) =>
-              idx === i
-                ? { ...s, status: 'success' as BrowserStatus, message: '준비 완료' }
-                : s
-            ));
-          } else {
-            failCount++;
-            // 실패 상태로 업데이트
-            setPreparingStatuses(prev => prev.map((s, idx) =>
-              idx === i
-                ? { ...s, status: 'error' as BrowserStatus, message: result.error || '시작 실패' }
-                : s
-            ));
+        // 해당 프로필의 상태 업데이트
+        setPreparingStatuses(prev => {
+          const newStatuses = [...prev];
+          const index = current - 1;
+          if (index >= 0 && index < newStatuses.length) {
+            newStatuses[index] = {
+              ...newStatuses[index],
+              status: result.success ? 'success' : 'error',
+              message: result.success
+                ? `준비 완료 (${result.proxyIp})`
+                : result.error || '준비 실패',
+              proxyGroupName: result.proxyGroupName,
+              proxyIp: result.proxyIp,
+            };
           }
-        } catch (error: any) {
-          failCount++;
-          // 에러 상태로 업데이트
-          setPreparingStatuses(prev => prev.map((s, idx) =>
-            idx === i
-              ? { ...s, status: 'error' as BrowserStatus, message: error.message || '오류 발생' }
-              : s
-          ));
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+          return newStatuses;
+        });
+      });
+      removeProgressListenerRef.current = removeListener;
+
+      // 프로필 목록 준비
+      const profileList = profiles.map(p => ({
+        user_id: p.user_id,
+        name: p.name,
+      }));
+
+      // BrowserManager를 통해 브라우저 준비
+      console.log('\n🔧 Preparing browsers with BrowserManager...');
+      const result = await window.electronAPI.crawler.prepareBrowsers(apiKey, profileList);
+
+      // 리스너 제거
+      removeListener();
+      removeProgressListenerRef.current = null;
+
+      if (result.success) {
+        const successCount = result.readyCount || 0;
+        const failCount = profiles.length - successCount;
+        setReadyBrowserCount(successCount);
+
+        alert(
+          `🎉 브라우저 준비 완료\n\n✅ 성공: ${successCount}개\n❌ 실패: ${failCount}개`
+        );
+      } else {
+        alert(`❌ 브라우저 준비 실패\n${result.error || '알 수 없는 오류'}`);
       }
-
-      // 세션 정보 로드
-      await loadSessions();
-
-      alert(
-        `🎉 브라우저 준비 완료\n\n✅ 성공: ${successCount}개\n❌ 실패: ${failCount}개`
-      );
     } catch (error: any) {
       alert(`❌ 오류 발생\n${error.message}`);
     } finally {
-      setIsVerifying(false);
-      // 준비 완료 후 상태 초기화 (크롤링 시작 후에는 progress.browserStatuses 사용)
+      setIsPreparing(false);
+      // 준비 완료 후 상태 초기화 (3초 후)
       setTimeout(() => setPreparingStatuses([]), 3000);
     }
   };
 
-  // 크롤링 시작
+  // 크롤링 시작 (준비된 브라우저 사용)
   const handleStartCrawling = async () => {
-    if (sessions.length === 0) {
-      alert('⚠️ 실행 중인 브라우저가 없습니다.\n먼저 "브라우저 준비" 버튼을 눌러주세요.');
+    if (readyBrowserCount === 0) {
+      alert('⚠️ 준비된 브라우저가 없습니다.\n먼저 "브라우저 준비" 버튼을 눌러주세요.');
       return;
     }
 
     setIsCrawling(true);
 
     try {
-      console.log(`\n🚀 Starting crawling with ${sessions.length} browsers\n`);
-      const result = await window.electronAPI.crawler.startBatch(apiKey, sessions);
+      console.log(`\n🚀 Starting crawling with ${readyBrowserCount} prepared browsers\n`);
+      const result = await window.electronAPI.crawler.startBatch();
 
       if (result.success) {
-        const successCount = result.results?.filter((r: any) => r.success).length || 0;
-        const failCount = result.results?.filter((r: any) => !r.success).length || 0;
-
-        alert(
-          `✅ 크롤링 완료\n\n` +
-          `총 처리: ${result.results?.length || 0}개\n` +
-          `성공: ${successCount}개\n` +
-          `실패: ${failCount}개`
-        );
+        alert(`✅ 크롤링이 완료되었습니다.`);
       } else {
         alert(`❌ 크롤링 실패\n${result.error}`);
       }
@@ -245,6 +208,17 @@ function Dashboard() {
       alert('🛑 크롤링 중지 요청됨');
     } catch (error: any) {
       alert(`❌ 중지 실패\n${error.message}`);
+    }
+  };
+
+  // 브라우저 정리
+  const handleClearBrowsers = async () => {
+    try {
+      await window.electronAPI.crawler.clearBrowsers();
+      setReadyBrowserCount(0);
+      alert('🧹 브라우저가 정리되었습니다.');
+    } catch (error: any) {
+      alert(`❌ 정리 실패\n${error.message}`);
     }
   };
 
@@ -279,6 +253,7 @@ function Dashboard() {
       case 'waiting': return '⏳';
       case 'recreating': return '🔁';
       case 'reconnecting': return '🔌';
+      case 'restarting': return '🔄';
       case 'preparing': return '🔧';
       default: return '⬜';
     }
@@ -294,6 +269,7 @@ function Dashboard() {
       case 'waiting': return 'bg-yellow-50 border-yellow-200';
       case 'recreating': return 'bg-orange-50 border-orange-200';
       case 'reconnecting': return 'bg-purple-50 border-purple-200';
+      case 'restarting': return 'bg-orange-50 border-orange-200';
       case 'preparing': return 'bg-cyan-50 border-cyan-200';
       default: return 'bg-gray-50 border-gray-200';
     }
@@ -307,17 +283,17 @@ function Dashboard() {
           {/* 브라우저 준비 버튼 */}
           <Button
             onClick={handlePrepareBrowsers}
-            disabled={isVerifying || isCrawling || profiles.length === 0}
+            disabled={isPreparing || isCrawling || profiles.length === 0}
             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6"
           >
-            {isVerifying ? '⏳ 준비 중...' : '🔗 브라우저 준비'}
+            {isPreparing ? '⏳ 준비 중...' : '🔗 브라우저 준비'}
           </Button>
 
           {/* 크롤링 시작/중지 버튼 */}
           {!isCrawling ? (
             <Button
               onClick={handleStartCrawling}
-              disabled={sessions.length === 0 || isVerifying}
+              disabled={readyBrowserCount === 0 || isPreparing}
               className="bg-green-600 hover:bg-green-700 text-white font-semibold px-6"
             >
               🚀 크롤링 시작
@@ -331,14 +307,25 @@ function Dashboard() {
               🛑 크롤링 중지
             </Button>
           )}
+
+          {/* 브라우저 정리 버튼 */}
+          {readyBrowserCount > 0 && !isCrawling && (
+            <Button
+              onClick={handleClearBrowsers}
+              variant="outline"
+              className="font-semibold px-6"
+            >
+              🧹 브라우저 정리
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* 세션 정보 표시 */}
-      {sessions.length > 0 && (
+      {/* 준비된 브라우저 정보 표시 */}
+      {readyBrowserCount > 0 && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
           <div className="text-sm text-green-800">
-            ✅ {sessions.length}개 브라우저 준비됨
+            ✅ {readyBrowserCount}개 브라우저 준비됨
           </div>
         </div>
       )}
@@ -444,11 +431,16 @@ function Dashboard() {
                           <div className="font-medium text-gray-800">
                             {browser.profileName}
                           </div>
-                          {browser.proxyIp && (
-                            <div className="text-xs text-gray-500 mt-0.5">
-                              🌐 {browser.proxyIp}
-                            </div>
-                          )}
+                          <div className="flex items-center gap-2 text-xs text-gray-500 mt-0.5">
+                            {browser.proxyGroupName && (
+                              <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
+                                {browser.proxyGroupName}
+                              </span>
+                            )}
+                            {browser.proxyIp && (
+                              <span>🌐 {browser.proxyIp}</span>
+                            )}
+                          </div>
                         </div>
                       </div>
                       <div className="text-sm text-right flex-shrink-0 ml-3">
@@ -478,12 +470,12 @@ function Dashboard() {
         <div className="bg-white rounded-lg shadow-md p-6 mt-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xl font-semibold">브라우저 준비 상태</h3>
-            {isVerifying && (
+            {isPreparing && (
               <span className="px-3 py-1 bg-cyan-100 text-cyan-800 rounded-full text-sm font-medium animate-pulse">
                 준비 중...
               </span>
             )}
-            {!isVerifying && preparingStatuses.some(s => s.status === 'success') && (
+            {!isPreparing && preparingStatuses.some(s => s.status === 'success') && (
               <span className="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
                 완료
               </span>
@@ -515,13 +507,20 @@ function Dashboard() {
                 key={browser.browserIndex}
                 className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
               >
-                <div className="flex items-center gap-3">
-                  <span className="text-lg">{getStatusIcon(browser.status)}</span>
-                  <span className="font-medium text-gray-800">
-                    {browser.profileName}
-                  </span>
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <span className="text-lg flex-shrink-0">{getStatusIcon(browser.status)}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-gray-800">
+                      {browser.profileName}
+                    </span>
+                    {browser.proxyGroupName && (
+                      <span className="ml-2 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">
+                        {browser.proxyGroupName}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div className="text-sm text-gray-500">
+                <div className="text-sm text-gray-500 flex-shrink-0 ml-3">
                   {browser.message}
                 </div>
               </div>

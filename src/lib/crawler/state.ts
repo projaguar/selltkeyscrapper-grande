@@ -226,6 +226,9 @@ export interface CrawlerProgress {
 // CrawlerBrowser 배열을 외부에서 주입받아 상태 조회
 let browserStatusesGetter: (() => BrowserStatusInfo[]) | null = null;
 
+// TaskQueueManager 참조 (정확한 completed/failed 카운트용)
+let taskQueueStatsGetter: (() => { completedCount: number; failedCount: number }) | null = null;
+
 /**
  * 브라우저 상태 조회 함수 등록 (crawler.ts에서 호출)
  */
@@ -241,14 +244,33 @@ export function unregisterBrowserStatusesGetter(): void {
 }
 
 /**
+ * TaskQueue 통계 조회 함수 등록 (중복 카운트 방지)
+ */
+export function registerTaskQueueStatsGetter(getter: () => { completedCount: number; failedCount: number }): void {
+  taskQueueStatsGetter = getter;
+}
+
+/**
+ * TaskQueue 통계 조회 함수 해제
+ */
+export function unregisterTaskQueueStatsGetter(): void {
+  taskQueueStatsGetter = null;
+}
+
+/**
  * 크롤링 진행 상태 조회 (DDD 패턴)
+ * TaskQueueManager의 Map 기반 카운트 사용 (중복 방지)
  */
 export function getCrawlerProgress(): CrawlerProgress {
+  // TaskQueueManager의 정확한 카운트 사용 (Map 기반으로 중복 없음)
+  const queueStats = taskQueueStatsGetter ? taskQueueStatsGetter() : null;
+
   return {
     isRunning: isCrawlerRunning,
     totalTasks: totalTasksCount,
-    completedTasks: completedTasksCount,
-    skippedTasks: skippedTasksCount,
+    // TaskQueueManager의 카운트 우선 사용 (중복 방지)
+    completedTasks: queueStats ? queueStats.completedCount : completedTasksCount,
+    skippedTasks: queueStats ? queueStats.failedCount : skippedTasksCount,
     pendingTasks: taskQueue.length,
     todayStopCount: blockedUserNums.size,
     currentBatch: currentBatchNumber,
