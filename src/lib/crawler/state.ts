@@ -16,6 +16,9 @@ import type { BrowserStatusInfo } from "./CrawlerBrowser";
 let blockedDate = new Date().toDateString();
 const blockedUserNums = new Set<number>();
 
+// insertUrl 관리 (서버에서 받은 결과 전송 URL)
+let currentInsertUrl = '';
+
 // 크롤러 제어를 위한 전역 변수
 const taskQueue: CrawlTask[] = [];
 let shouldStopCrawler = false;
@@ -252,4 +255,23 @@ export function getCrawlerProgress(): CrawlerProgress {
     elapsedTime: getElapsedTime(),
     browserStatuses: browserStatusesGetter ? browserStatusesGetter() : [],
   };
+}
+
+// ========================================
+// insertUrl 관리
+// ========================================
+
+/**
+ * insertUrl 설정
+ */
+export function setInsertUrl(url: string): void {
+  currentInsertUrl = url;
+  console.log(`[State] insertUrl updated: ${url}`);
+}
+
+/**
+ * insertUrl 조회
+ */
+export function getInsertUrl(): string {
+  return currentInsertUrl;
 }

@@ -16,6 +16,8 @@ import {
   checkAndResetIfNewDay,
   clearTaskQueue,
   addToTotalTasks,
+  setInsertUrl,
+  getInsertUrl,
 } from "./state";
 import { getUrlList } from "../../services/api";
 
@@ -24,10 +26,7 @@ import { getUrlList } from "../../services/api";
  * - 큐에서 블록되지 않은 tasks 가져오기
  * - 큐가 비어있으면 서버에서 조회
  */
-export async function fetchTasks(
-  n: number,
-  insertUrlRef: { current: string }
-): Promise<CrawlTask[]> {
+export async function fetchTasks(n: number): Promise<CrawlTask[]> {
   // 날짜가 바뀌었으면 블록 목록 초기화
   checkAndResetIfNewDay();
 
@@ -55,7 +54,7 @@ export async function fetchTasks(
 
         // insertUrl 업데이트
         if (insertUrl) {
-          insertUrlRef.current = insertUrl;
+          setInsertUrl(insertUrl);
         }
 
         console.log(
@@ -91,7 +90,6 @@ export function removeCompletedTasks(tasks: CrawlTask[]): void {
   for (const task of tasks) {
     removeTaskFromQueue(task.URLNUM);
   }
-  console.log(`[TaskManager] Removed ${tasks.length} completed tasks from queue`);
 }
 
 /**
@@ -99,7 +97,6 @@ export function removeCompletedTasks(tasks: CrawlTask[]): void {
  */
 export function requeueTasks(tasks: CrawlTask[]): void {
   addTasksToQueue(tasks);
-  console.log(`[TaskManager] Requeued ${tasks.length} tasks for retry`);
 }
 
 /**
@@ -116,10 +113,6 @@ export function handleTodayStopResults(
     return;
   }
 
-  console.log(
-    `\n[TaskManager] ${todayStopResults.length} results with todayStop detected\n`
-  );
-
   for (const result of todayStopResults) {
     const taskIndex = results.indexOf(result);
     if (taskIndex !== -1 && taskIndex < tasks.length) {
@@ -127,24 +120,20 @@ export function handleTodayStopResults(
       addBlockedUser(blockedTask.USERNUM);
     }
   }
-
-  console.log(`[TaskManager] Total blocked USERNUMs: ${getBlockedUserCount()}\n`);
 }
 
 /**
  * 크롤링 결과를 서버에 전송
  */
-export async function postGoodsList(
-  data: any,
-  insertUrl: string
-): Promise<boolean> {
+export async function postGoodsList(data: any): Promise<boolean> {
   try {
-    console.log(
-      `[TaskManager] Sending ${data.platforms} data to: ${insertUrl}`
-    );
-    console.log(
-      `[TaskManager] urlnum=${data.urlnum}, usernum=${data.usernum}, products=${data.result?.list?.length || 0}`
-    );
+    // 최신 insertUrl 가져오기
+    const insertUrl = getInsertUrl();
+
+    if (!insertUrl) {
+      console.warn('[TaskManager] insertUrl not set, skipping post');
+      return false;
+    }
 
     const response = await fetch(insertUrl, {
       method: "POST",
@@ -157,12 +146,9 @@ export async function postGoodsList(
     }
 
     const result = await response.json();
-    const todayStop = result.todayStop || false;
-
-    console.log(`[TaskManager] Server response: todayStop=${todayStop}`);
-    return todayStop;
+    return result.todayStop || false;
   } catch (error: any) {
-    console.error(`[TaskManager] Failed to post data: ${error.message}`);
+    console.error(`[TaskManager] 서버 전송 실패: ${error.message}`);
     return false;
   }
 }

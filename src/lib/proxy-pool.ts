@@ -1,6 +1,6 @@
 import * as db from '../database/sqlite';
 
-interface Proxy {
+export interface Proxy {
   id: number;
   ip: string;
   port: string;

@@ -2,7 +2,7 @@
  * 네이버 크롤링 로직
  */
 
-import type { CrawlTask, CrawlResult, CrawlData } from "../types";
+import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
 
 /**
@@ -100,11 +100,8 @@ function collectNaverProducts(data: any, targetList: number[]): any[] {
 export async function crawlNaver(
   page: any,
   task: CrawlTask,
-  insertUrl: string,
   profileName: string
 ): Promise<CrawlResult> {
-  console.log(`[Naver] ${profileName} - Starting crawl`);
-
   // CAPTCHA 체크
   if (await detectNaverCaptcha(page)) {
     console.log(`[Naver] ${profileName} - CAPTCHA detected!`);
@@ -151,10 +148,6 @@ export async function crawlNaver(
       ...(task.NEWYN === "Y" ? newList : []),
     ];
 
-    console.log(
-      `[Naver] ${profileName} - Found ${bestList.length} best, ${newList.length} new products`
-    );
-
     if (targetList.length === 0) {
       result.data!.errorMsg = "베스트 상품이 없음";
     } else {
@@ -176,10 +169,6 @@ export async function crawlNaver(
         // 이름 필터링
         const nameFiltered = priceFiltered.filter((item: any) =>
           Boolean(item.name)
-        );
-
-        console.log(
-          `[Naver] ${profileName} - Filtered: ${nameFiltered.length} products (price: ${spricelimit}~${epricelimit})`
         );
 
         if (nameFiltered.length === 0) {
@@ -206,10 +195,6 @@ export async function crawlNaver(
     }
   }
 
-  console.log(
-    `[Naver] ${profileName} - Result: ${result.data!.errorMsg} (${result.data!.list.length} products)`
-  );
-
   // 서버에 데이터 전송
   const postData = {
     urlnum: task.URLNUM,
@@ -222,11 +207,14 @@ export async function crawlNaver(
     result: result.data || { error: true, errorMsg: "", list: [] },
   };
 
-  const todayStop = await postGoodsList(postData, insertUrl);
+  const todayStop = await postGoodsList(postData);
   result.todayStop = todayStop;
 
+  // 서버 전송 결과 출력
+  const statusIcon = result.success ? "✓" : "✗";
+  const productCount = result.data!.list.length;
   console.log(
-    `[Naver] ${profileName} - Completed (todayStop=${result.todayStop})`
+    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${todayStop ? "중단" : "완료"}`
   );
 
   return result;

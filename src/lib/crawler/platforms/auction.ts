@@ -172,14 +172,11 @@ function collectAuctionProducts(modules: any[]): any[] {
 export async function crawlAuction(
   page: any,
   task: CrawlTask,
-  insertUrl: string,
   profileName: string
 ): Promise<CrawlResult> {
-  console.log(`[Auction] ${profileName} - Starting crawl`);
-
   // Cloudflare 블록 체크 (브라우저 재시작 필요)
   if (await detectCloudflareBlock(page)) {
-    console.log(`[Auction] ${profileName} - Cloudflare block detected! Browser restart required.`);
+    console.log(`[Auction] ${profileName} - Cloudflare block detected!`);
     throw new Error("Cloudflare block detected - IP change needed");
   }
 
@@ -214,8 +211,7 @@ export async function crawlAuction(
 
   if (!textContent) {
     result.data!.errorMsg = "데이터 로드 실패";
-    console.log(`[Auction] ${profileName} - Failed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   let data: any;
@@ -223,8 +219,7 @@ export async function crawlAuction(
     data = JSON.parse(textContent);
   } catch (error) {
     result.data!.errorMsg = "데이터 파싱 실패";
-    console.log(`[Auction] ${profileName} - Failed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   // 데이터 구조 탐색
@@ -234,20 +229,15 @@ export async function crawlAuction(
 
   if (!modules || !Array.isArray(modules)) {
     result.data!.errorMsg = "상품 데이터 없음";
-    console.log(`[Auction] ${profileName} - Failed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   // 상품 수집
   const collectedProducts = collectAuctionProducts(modules);
-  console.log(
-    `[Auction] ${profileName} - Collected ${collectedProducts.length} products`
-  );
 
   if (collectedProducts.length === 0) {
     result.data!.errorMsg = "상품 없음";
-    console.log(`[Auction] ${profileName} - Completed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   // 중복 제거
@@ -264,8 +254,7 @@ export async function crawlAuction(
 
   if (overseasProducts.length === 0) {
     result.data!.errorMsg = "국내사업자입니다.";
-    console.log(`[Auction] ${profileName} - Completed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   // 가격 필터링
@@ -282,14 +271,9 @@ export async function crawlAuction(
     Boolean(item.goodsname)
   );
 
-  console.log(
-    `[Auction] ${profileName} - Filtered: ${nameFiltered.length} products (overseas: ${overseasProducts.length}, price: ${spricelimit}~${epricelimit})`
-  );
-
   if (nameFiltered.length === 0) {
     result.data!.errorMsg = "가격/이름 필터링 후 상품 없음";
-    console.log(`[Auction] ${profileName} - Completed: ${result.data!.errorMsg}`);
-    return result;
+    return outputResult(result, task);
   }
 
   // 최종 결과
@@ -309,10 +293,13 @@ export async function crawlAuction(
     seoinfo: item.seoinfo,
   }));
 
-  console.log(
-    `[Auction] ${profileName} - Result: ${result.data!.errorMsg} (${result.data!.list.length} products)`
-  );
+  return outputResult(result, task);
+}
 
+/**
+ * 결과 출력 및 서버 전송
+ */
+async function outputResult(result: CrawlResult, task: CrawlTask): Promise<CrawlResult> {
   // 서버에 데이터 전송
   const postData = {
     urlnum: task.URLNUM,
@@ -325,11 +312,14 @@ export async function crawlAuction(
     result: result.data || { error: true, errorMsg: "", list: [] },
   };
 
-  const todayStop = await postGoodsList(postData, insertUrl);
+  const todayStop = await postGoodsList(postData);
   result.todayStop = todayStop;
 
+  // 서버 전송 결과 출력
+  const statusIcon = result.success ? "✓" : "✗";
+  const productCount = result.data!.list.length;
   console.log(
-    `[Auction] ${profileName} - Completed (todayStop=${result.todayStop})`
+    `[Auction] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Auction 서버전송: ${todayStop ? "중단" : "완료"}`
   );
 
   return result;
