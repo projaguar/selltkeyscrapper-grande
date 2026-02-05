@@ -48,6 +48,7 @@ export interface CrawlerBrowserConfig {
   proxy?: Proxy;
   proxyGroupId?: number;
   proxyGroupName?: string;
+  browserIndex?: number; // 계단식 창 배치용 인덱스
 }
 
 // ========================================
@@ -91,6 +92,17 @@ export class CrawlerBrowser {
   // 재시작 중복 방지
   private isRestarting: boolean = false;
 
+  // 이미지 차단 플래그 (실시간 제어 가능)
+  private blockImages: boolean = false;
+  private requestInterceptionSetup: boolean = false;
+
+  // IP 로테이션 관리 (크롤링 카운트)
+  private crawlCount: number = 0;
+  private readonly maxCrawlsPerIp: number = 30;
+
+  // 창 배치용 인덱스
+  private readonly browserIndex: number;
+
   // ========================================
   // Constructor
   // ========================================
@@ -99,6 +111,7 @@ export class CrawlerBrowser {
     this.profileId = config.profileId;
     this.profileName = config.profileName;
     this.apiKey = config.apiKey;
+    this.browserIndex = config.browserIndex ?? 0;
 
     if (config.proxy) {
       this.assignProxy(config.proxy);
@@ -230,8 +243,11 @@ export class CrawlerBrowser {
       // 4. 탭 정리 (1개만 유지)
       await this.cleanupTabs();
 
-      // 5. 이미지/미디어 차단 설정 (성능 최적화) - 비활성화
-      // await this.setupResourceBlocking();
+      // 5. 창 위치/크기 설정 (계단식 배치)
+      await this.setupWindowPosition();
+
+      // 6. 리소스 차단 설정 (실시간 제어 가능)
+      await this.setupResourceBlocking();
 
       // 6. AdsPower에 설정된 실제 프록시 정보 동기화
       try {
@@ -516,23 +532,132 @@ export class CrawlerBrowser {
   }
 
   /**
-   * 이미지/미디어 리소스 차단 설정 (성능 최적화)
+   * 리소스 차단 설정 (실시간 제어 가능)
+   * 브라우저 시작 시 한 번만 호출, 이후 setImageBlocking()으로 제어
    */
-  private async setupResourceBlocking(): Promise<void> {
-    if (!this.browser) return;
+  async setupResourceBlocking(): Promise<void> {
+    if (!this.browser || this.requestInterceptionSetup) return;
 
     const page = await this.getPage();
 
     await page.setRequestInterception(true);
     page.on("request", (request: any) => {
       const resourceType = request.resourceType();
-      // 이미지, 스타일시트, 폰트, 미디어 차단
-      if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
+
+      // 이미지 차단 (blockImages 플래그에 따라 동적 제어)
+      if (this.blockImages && resourceType === "image") {
         request.abort();
       } else {
         request.continue();
       }
     });
+
+    this.requestInterceptionSetup = true;
+    console.log(`[CrawlerBrowser] ${this.profileName} - 리소스 차단 설정 완료`);
+  }
+
+  /**
+   * 이미지 차단 설정 (실시간 변경 가능, 브라우저 reload 불필요)
+   * @param block true: 이미지 차단, false: 이미지 허용
+   */
+  setImageBlocking(block: boolean): void {
+    const changed = this.blockImages !== block;
+    this.blockImages = block;
+    if (changed) {
+      console.log(`[CrawlerBrowser] ${this.profileName} - 이미지 차단: ${block ? 'ON' : 'OFF'}`);
+    }
+  }
+
+  /**
+   * 현재 이미지 차단 상태 확인
+   */
+  isImageBlocked(): boolean {
+    return this.blockImages;
+  }
+
+  // ========================================
+  // IP 로테이션 관리
+  // ========================================
+
+  /**
+   * 크롤링 카운트 증가 (크롤링 완료 후 호출)
+   */
+  incrementCrawlCount(): void {
+    this.crawlCount++;
+    console.log(`[CrawlerBrowser] ${this.profileName} - 크롤링 카운트: ${this.crawlCount}/${this.maxCrawlsPerIp}`);
+  }
+
+  /**
+   * IP 로테이션 필요 여부 확인
+   */
+  needsIpRotation(): boolean {
+    return this.crawlCount >= this.maxCrawlsPerIp;
+  }
+
+  /**
+   * 크롤링 카운트 리셋 (IP 전환 후 호출)
+   */
+  resetCrawlCount(): void {
+    this.crawlCount = 0;
+    console.log(`[CrawlerBrowser] ${this.profileName} - 크롤링 카운트 리셋`);
+  }
+
+  /**
+   * 현재 크롤링 카운트 조회
+   */
+  getCrawlCount(): number {
+    return this.crawlCount;
+  }
+
+  // ========================================
+  // 창 위치/크기 관리
+  // ========================================
+
+  /**
+   * 브라우저 창 위치 및 크기 설정 (계단식 배치)
+   * - 해상도: 1366x768 (일반 사무용 노트북)
+   * - 계단식 오프셋: 30px (타이틀 바 높이)
+   * - 최대 10개까지 순환 (화면 밖으로 나가지 않도록)
+   */
+  private async setupWindowPosition(): Promise<void> {
+    if (!this.browser) return;
+
+    try {
+      const page = await this.getPage();
+
+      // 계단식 배치 계산 (최대 10개까지 순환)
+      const maxSlots = 10;
+      const slotIndex = this.browserIndex % maxSlots;
+
+      const offsetX = 30;
+      const offsetY = 30;
+      const startX = 50;
+      const startY = 50;
+
+      const left = startX + slotIndex * offsetX;
+      const top = startY + slotIndex * offsetY;
+
+      // 일반적인 브라우저 사용 크기
+      const width = 1024;
+      const height = 700;
+
+      // CDP 세션으로 창 위치/크기 설정
+      const client = await page.target().createCDPSession();
+
+      // 현재 윈도우 ID 가져오기
+      const { windowId } = await client.send("Browser.getWindowForTarget");
+
+      // 창 위치/크기 설정
+      await client.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { left, top, width, height },
+      });
+
+      console.log(`[CrawlerBrowser] ${this.profileName} - 창 위치: (${left}, ${top}), 크기: ${width}x${height}`);
+    } catch (error: any) {
+      // 창 위치 설정 실패는 무시 (크롤링에 영향 없음)
+      console.log(`[CrawlerBrowser] ${this.profileName} - 창 위치 설정 실패: ${error.message}`);
+    }
   }
 
   /**

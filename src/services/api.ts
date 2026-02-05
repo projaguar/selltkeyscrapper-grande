@@ -15,7 +15,19 @@ export async function getUrlList() {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const data = await response.json();
+    const text = await response.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error('[API] JSON 파싱 오류 - 서버 원본 응답:');
+      console.error('='.repeat(50));
+      console.error(text);
+      console.error('='.repeat(50));
+      throw parseError;
+    }
+
     // 서버 응답: { inserturl: "...", item: [...] }
     return {
       inserturl: data.inserturl || '',

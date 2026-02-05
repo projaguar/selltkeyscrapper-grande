@@ -165,6 +165,9 @@ async function browserWorker(
       // Queue에 완료 표시
       taskQueue.markComplete(task, result);
 
+      // 크롤링 카운트 증가
+      browser.incrementCrawlCount();
+
       // 성공/실패 카운트
       if (result.success) {
         incrementCompleted(1);
@@ -175,6 +178,13 @@ async function browserWorker(
       // CAPTCHA 감지 시 재시작
       if (result.captchaDetected) {
         await handleBrowserRestart(browser, workerIndex, 'CAPTCHA 감지');
+      }
+
+      // IP 로테이션 필요 시 재시작 (30회 크롤링 후)
+      if (browser.needsIpRotation()) {
+        console.log(`[Worker ${workerIndex}] ${browser.getProfileName()} - IP 로테이션 필요 (${browser.getCrawlCount()}회 크롤링 완료)`);
+        await handleBrowserRestart(browser, workerIndex, 'IP 로테이션');
+        browser.resetCrawlCount();
       }
 
     } catch (error: any) {
@@ -460,6 +470,13 @@ async function processSingleTask(
 
   if (!browser.hasBrowser()) {
     throw new Error("Browser not available");
+  }
+
+  // 플랫폼별 이미지 차단 설정 (실시간 적용, reload 불필요)
+  if (task.URLPLATFORMS === "NAVER") {
+    browser.setImageBlocking(true);  // 네이버: 이미지 차단 (성능 최적화)
+  } else if (task.URLPLATFORMS === "AUCTION") {
+    browser.setImageBlocking(false); // 옥션: 이미지 필요 (상품 이미지 수집)
   }
 
   const page = await preparePage(browser, task);

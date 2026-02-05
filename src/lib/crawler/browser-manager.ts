@@ -119,6 +119,7 @@ class BrowserManager {
         apiKey: this.apiKey,
         proxyGroupId: assignment.groupId,
         proxyGroupName: assignment.groupName,
+        browserIndex: i, // 계단식 창 배치용
       });
 
       // 프록시 할당 + 브라우저 시작 + 테스트 (최대 10회 재시도)
