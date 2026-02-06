@@ -12,6 +12,7 @@
     "build:unpack": "bun run build && electron-builder --dir",
     "build:win": "bun run build && electron-builder --win --x64",
     "build:mac": "bun run build && electron-builder --mac",
+    "build:macCertification": "set -a && source .env && set +a && electron-vite build && electron-builder --mac",
     "build:linux": "bun run build && electron-builder --linux",
     "type-check": "tsc -b",
     "lint": "eslint .",
