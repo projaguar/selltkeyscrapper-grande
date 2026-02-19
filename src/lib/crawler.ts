@@ -287,10 +287,10 @@ async function taskFetcher(
 ): Promise<void> {
   const browsers = browserManager.getBrowsers();
 
-  // 개발 환경(bun run dev)이면 10개로 제한, 프로덕션은 브라우저 개수 × 50
+  // 개발 환경(bun run dev)이면 10개로 제한, 프로덕션은 브라우저 개수 × 100
   const limit = process.env.NODE_ENV === 'development'
     ? 10
-    : browsers.length * 50;
+    : browsers.length * 100;
 
   while (!shouldStop()) {
     // 태스크 가져오기

@@ -92,25 +92,19 @@ class BrowserManager {
       groupIndex++;
     }
 
-    // 남은 브라우저가 있으면 마지막 그룹에 할당
+    // 그룹 할당 수가 프로필 수보다 적으면 초과 프로필은 스킵
     if (remainingBrowsers > 0) {
-      const lastGroup = proxyGroups[proxyGroups.length - 1];
-      for (let i = 0; i < remainingBrowsers; i++) {
-        groupAssignments.push({
-          groupId: lastGroup.id,
-          groupName: lastGroup.name,
-        });
-      }
+      console.log(`[BrowserManager] ${remainingBrowsers} profiles exceed group capacity, will be skipped`);
     }
 
-    console.log(`[BrowserManager] Group assignments: ${groupAssignments.map((g) => g.groupName).join(", ")}`);
+    console.log(`[BrowserManager] Group assignments: ${groupAssignments.map((g) => g.groupName).join(", ")} (${groupAssignments.length}/${profiles.length})`);
 
-    // 각 프로필에 대해 브라우저 준비
-    for (let i = 0; i < profiles.length; i++) {
+    // 할당된 프로필에 대해서만 브라우저 준비
+    for (let i = 0; i < groupAssignments.length; i++) {
       const profile = profiles[i];
       const assignment = groupAssignments[i];
 
-      console.log(`[BrowserManager] Preparing browser ${i + 1}/${profiles.length}: ${profile.name} [${assignment.groupName}]`);
+      console.log(`[BrowserManager] Preparing browser ${i + 1}/${groupAssignments.length}: ${profile.name} [${assignment.groupName}]`);
 
       // CrawlerBrowser 생성
       const browser = new CrawlerBrowser({
@@ -135,6 +129,22 @@ class BrowserManager {
       // 진행 상황 콜백
       if (onProgress) {
         onProgress(i, profiles.length, result);
+      }
+    }
+
+    // 그룹 용량 초과로 할당되지 않은 프로필은 실패 처리
+    for (let i = groupAssignments.length; i < profiles.length; i++) {
+      const profile = profiles[i];
+      const skipResult: PreparationResult = {
+        success: false,
+        profileId: profile.user_id,
+        profileName: profile.name,
+        error: '그룹 최대 브라우저 수 초과',
+      };
+      results.push(skipResult);
+
+      if (onProgress) {
+        onProgress(i, profiles.length, skipResult);
       }
     }
 
