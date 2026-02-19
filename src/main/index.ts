@@ -712,7 +712,8 @@ ipcMain.handle('crawler-get-status', async () => {
 ipcMain.handle('crawler-get-progress', async () => {
   try {
     const progress = getCrawlerProgress();
-    return { success: true, progress };
+    const browserManager = getBrowserManager();
+    return { success: true, progress, readyBrowserCount: browserManager.getReadyCount() };
   } catch (error: any) {
     console.error('[Crawler] Failed to get progress:', error);
     return { success: false, error: error.message };

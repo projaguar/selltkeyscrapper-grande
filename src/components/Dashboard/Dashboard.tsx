@@ -59,11 +59,18 @@ function Dashboard() {
 
   // 크롤링 진행 상태 주기적 조회
   useEffect(() => {
+    let isFirstFetch = true;
+
     const fetchProgress = async () => {
       try {
         const result = await window.electronAPI.crawler.getProgress();
         if (result.success) {
           setProgress(result.progress);
+          // 마운트 시 1회만 복원: 백엔드에 준비된 브라우저가 있으면 반영
+          if (isFirstFetch && result.readyBrowserCount > 0) {
+            setReadyBrowserCount(result.readyBrowserCount);
+          }
+          isFirstFetch = false;
         }
       } catch (error) {
         console.error('[Dashboard] Failed to fetch progress:', error);
