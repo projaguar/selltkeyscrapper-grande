@@ -177,6 +177,7 @@ export function resetProgress(): void {
   currentBatchNumber = 0;
   waitEndTime = null;
   waitReason = '';
+  crawlerStartTime = Date.now();
 }
 
 /**
