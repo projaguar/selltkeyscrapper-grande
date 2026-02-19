@@ -35,6 +35,8 @@ interface CrawlerProgress {
   todayStopCount: number;
   elapsedTime: number;
   browserStatuses: BrowserStatusInfo[];
+  waitEndTime: number | null;
+  waitReason: string;
 }
 
 interface PreparationResult {
@@ -414,6 +416,36 @@ function Dashboard() {
                 경과 시간: <span className="font-medium">{formatElapsedTime(progress.elapsedTime)}</span>
               </div>
             )}
+
+            {/* 대기 시간 Progress Bar */}
+            {progress.isRunning && (() => {
+              const isWaiting = progress.waitEndTime !== null && progress.waitEndTime > Date.now();
+              const WAIT_DURATION = 5 * 60 * 1000;
+              const remaining = isWaiting ? Math.max(0, progress.waitEndTime! - Date.now()) : 0;
+              const elapsed = WAIT_DURATION - remaining;
+              const percent = isWaiting ? Math.min(100, Math.round((elapsed / WAIT_DURATION) * 100)) : 0;
+              const remainMin = Math.floor(remaining / 60000);
+              const remainSec = Math.floor((remaining % 60000) / 1000);
+
+              return (
+                <div className={`mt-4 p-3 rounded-lg border ${isWaiting ? 'bg-indigo-50 border-indigo-200' : 'bg-gray-50 border-gray-200'}`}>
+                  <div className="flex justify-between text-xs mb-1.5">
+                    <span className={isWaiting ? 'text-indigo-600 font-medium' : 'text-gray-400'}>
+                      {isWaiting ? progress.waitReason : '대기 없음'}
+                    </span>
+                    <span className={isWaiting ? 'text-indigo-600 font-medium' : 'text-gray-400'}>
+                      {isWaiting ? `${remainMin}분 ${remainSec}초 남음` : ''}
+                    </span>
+                  </div>
+                  <div className={`w-full rounded-full h-2 ${isWaiting ? 'bg-indigo-100' : 'bg-gray-200'}`}>
+                    <div
+                      className={`h-2 rounded-full transition-all duration-1000 ${isWaiting ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                      style={{ width: `${percent}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* 브라우저 상태 목록 */}
             {progress.browserStatuses && progress.browserStatuses.length > 0 && (

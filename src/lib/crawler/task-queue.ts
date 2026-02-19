@@ -126,6 +126,16 @@ export class TaskQueueManager {
   }
 
   /**
+   * 모든 상태 완전 초기화 (진행 상태 포함)
+   */
+  reset(): void {
+    this.queue = [];
+    this.processing.clear();
+    this.completed.clear();
+    this.failed.clear();
+  }
+
+  /**
    * Queue가 비어있는지 확인
    */
   isEmpty(): boolean {

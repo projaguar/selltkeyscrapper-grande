@@ -15,7 +15,6 @@ import {
   getBlockedUserCount,
   checkAndResetIfNewDay,
   clearTaskQueue,
-  addToTotalTasks,
   setInsertUrl,
   getInsertUrl,
 } from "./state";
@@ -37,10 +36,10 @@ export async function fetchTasks(n: number): Promise<CrawlTask[]> {
 
   // 유효한 tasks가 없으면 서버에서 조회
   if (validTasks.length === 0) {
-    console.log("[TaskManager] Queue is empty, fetching from server...");
+    console.log(`[TaskManager] Queue is empty, fetching from server (limit: ${n})...`);
 
     try {
-      const response = await getUrlList();
+      const response = await getUrlList(n);
       const newTasks = response.item || [];
       const insertUrl = response.inserturl || "";
 
@@ -48,9 +47,6 @@ export async function fetchTasks(n: number): Promise<CrawlTask[]> {
         // 기존 큐 비우고 새 tasks 추가
         clearTaskQueue();
         addTasksToQueue(newTasks);
-
-        // 전체 Task 수 업데이트 (진행률 표시용)
-        addToTotalTasks(newTasks.length);
 
         // insertUrl 업데이트
         if (insertUrl) {
@@ -124,15 +120,16 @@ export function handleTodayStopResults(
 
 /**
  * 크롤링 결과를 서버에 전송
+ * @returns {success: 전송 성공 여부, todayStop: 오늘 중단 여부}
  */
-export async function postGoodsList(data: any): Promise<boolean> {
+export async function postGoodsList(data: any): Promise<{success: boolean, todayStop: boolean}> {
   try {
     // 최신 insertUrl 가져오기
     const insertUrl = getInsertUrl();
 
     if (!insertUrl) {
       console.warn('[TaskManager] insertUrl not set, skipping post');
-      return false;
+      return {success: false, todayStop: false};
     }
 
     const response = await fetch(insertUrl, {
@@ -146,9 +143,9 @@ export async function postGoodsList(data: any): Promise<boolean> {
     }
 
     const result = await response.json();
-    return result.todayStop || false;
+    return {success: true, todayStop: result.todayStop || false};
   } catch (error: any) {
     console.error(`[TaskManager] 서버 전송 실패: ${error.message}`);
-    return false;
+    return {success: false, todayStop: false};
   }
 }

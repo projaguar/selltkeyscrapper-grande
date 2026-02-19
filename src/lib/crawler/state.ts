@@ -31,6 +31,10 @@ let completedTasksCount = 0;
 let skippedTasksCount = 0;
 let currentBatchNumber = 0;
 
+// 대기 상태 (5분 대기 progress bar 용)
+let waitEndTime: number | null = null;
+let waitReason = '';
+
 /**
  * 날짜가 바뀌었으면 블록 목록 초기화
  */
@@ -171,6 +175,8 @@ export function resetProgress(): void {
   completedTasksCount = 0;
   skippedTasksCount = 0;
   currentBatchNumber = 0;
+  waitEndTime = null;
+  waitReason = '';
 }
 
 /**
@@ -209,6 +215,22 @@ export function setCurrentBatch(batchNum: number): void {
 }
 
 /**
+ * 대기 상태 설정 (5분 대기 progress bar 용)
+ */
+export function setWaitState(endTime: number, reason: string): void {
+  waitEndTime = endTime;
+  waitReason = reason;
+}
+
+/**
+ * 대기 상태 해제
+ */
+export function clearWaitState(): void {
+  waitEndTime = null;
+  waitReason = '';
+}
+
+/**
  * 크롤링 진행 상태 조회
  */
 export interface CrawlerProgress {
@@ -221,6 +243,8 @@ export interface CrawlerProgress {
   currentBatch: number;
   elapsedTime: number;
   browserStatuses: BrowserStatusInfo[];
+  waitEndTime: number | null;
+  waitReason: string;
 }
 
 // CrawlerBrowser 배열을 외부에서 주입받아 상태 조회
@@ -262,20 +286,18 @@ export function unregisterTaskQueueStatsGetter(): void {
  * TaskQueueManager의 Map 기반 카운트 사용 (중복 방지)
  */
 export function getCrawlerProgress(): CrawlerProgress {
-  // TaskQueueManager의 정확한 카운트 사용 (Map 기반으로 중복 없음)
-  const queueStats = taskQueueStatsGetter ? taskQueueStatsGetter() : null;
-
   return {
     isRunning: isCrawlerRunning,
     totalTasks: totalTasksCount,
-    // TaskQueueManager의 카운트 우선 사용 (중복 방지)
-    completedTasks: queueStats ? queueStats.completedCount : completedTasksCount,
-    skippedTasks: queueStats ? queueStats.failedCount : skippedTasksCount,
+    completedTasks: completedTasksCount,
+    skippedTasks: skippedTasksCount,
     pendingTasks: taskQueue.length,
     todayStopCount: blockedUserNums.size,
     currentBatch: currentBatchNumber,
     elapsedTime: getElapsedTime(),
     browserStatuses: browserStatusesGetter ? browserStatusesGetter() : [],
+    waitEndTime,
+    waitReason,
   };
 }
 

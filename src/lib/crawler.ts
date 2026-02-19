@@ -28,12 +28,15 @@ import {
   isRunning,
   setRunning,
   resetProgress,
+  setTotalTasks,
   incrementCompleted,
   incrementSkipped,
   registerBrowserStatusesGetter,
   unregisterBrowserStatusesGetter,
   registerTaskQueueStatsGetter,
   unregisterTaskQueueStatsGetter,
+  setWaitState,
+  clearWaitState,
 } from "./crawler/state";
 
 // 모듈
@@ -41,9 +44,6 @@ import { fetchTasks, removeCompletedTasks, handleTodayStopResults } from "./craw
 import { crawlNaver } from "./crawler/platforms/naver";
 import { crawlAuction } from "./crawler/platforms/auction";
 import { getProxyPool } from "./proxy-pool";
-
-// 10분 대기 시간 (ms)
-const EMPTY_QUEUE_DELAY = 10 * 60 * 1000;
 
 // 실제 오류로 분류할 키워드
 const ERROR_KEYWORDS = [
@@ -165,11 +165,8 @@ async function browserWorker(
       // Queue에 완료 표시
       taskQueue.markComplete(task, result);
 
-      // 크롤링 카운트 증가
-      browser.incrementCrawlCount();
-
-      // 성공/실패 카운트
-      if (result.success) {
+      // 성공/실패 카운트 (서버 전송 성공 여부 기준)
+      if (result.serverTransmitted) {
         incrementCompleted(1);
       } else {
         incrementSkipped(1);
@@ -178,13 +175,6 @@ async function browserWorker(
       // CAPTCHA 감지 시 재시작
       if (result.captchaDetected) {
         await handleBrowserRestart(browser, workerIndex, 'CAPTCHA 감지');
-      }
-
-      // IP 로테이션 필요 시 재시작 (30회 크롤링 후)
-      if (browser.needsIpRotation()) {
-        console.log(`[Worker ${workerIndex}] ${browser.getProfileName()} - IP 로테이션 필요 (${browser.getCrawlCount()}회 크롤링 완료)`);
-        await handleBrowserRestart(browser, workerIndex, 'IP 로테이션');
-        browser.resetCrawlCount();
       }
 
     } catch (error: any) {
@@ -284,32 +274,136 @@ async function handleBrowserRestart(
  * =====================================================
  * Task Fetcher (Producer)
  * =====================================================
- * 백그라운드에서 주기적으로 Task를 가져와 Queue에 추가
+ * 새로운 정책:
+ * 1. 브라우저 개수 x 50개 태스크 가져오기
+ * 2. 진행 상태 리셋
+ * 3. 모든 작업 완료 대기
+ * 4. 5분 휴식 + 모든 브라우저 IP 일괄 변경
+ * 5. 반복
  */
 async function taskFetcher(
   taskQueue: TaskQueueManager,
-  batchSize: number
+  browserManager: ReturnType<typeof getBrowserManager>
 ): Promise<void> {
-  while (!shouldStop()) {
-    // Queue에 충분한 Task가 있으면 대기
-    if (taskQueue.size() >= batchSize) {
-      await delay(5000);
-      continue;
-    }
+  const browsers = browserManager.getBrowsers();
 
-    // Task 가져오기
-    const tasks = await fetchTasks(batchSize);
+  // 개발 환경(bun run dev)이면 10개로 제한, 프로덕션은 브라우저 개수 × 50
+  const limit = process.env.NODE_ENV === 'development'
+    ? 10
+    : browsers.length * 50;
+
+  while (!shouldStop()) {
+    // 태스크 가져오기
+    console.log(`[TaskFetcher] Fetching tasks (limit: ${limit}, env: ${process.env.NODE_ENV || 'production'})...`);
+    const tasks = await fetchTasks(limit);
 
     if (tasks.length === 0) {
-      console.log(`[TaskFetcher] Task 없음, 10분 대기...`);
-      await delay(EMPTY_QUEUE_DELAY);
+      console.log(`[TaskFetcher] No tasks available, waiting 5 minutes...`);
+      setWaitState(Date.now() + 5 * 60 * 1000, "Task 조회 대기 중...");
+      await delay(5 * 60 * 1000);
+      clearWaitState();
       continue;
     }
 
-    // Queue에 추가
+    // 진행 상태 완전 리셋 (큐, 처리중, 완료, 실패 모두 초기화)
+    console.log(`[TaskFetcher] Resetting queue stats...`);
+    taskQueue.reset();
+    resetProgress();
+    setTotalTasks(tasks.length);
+
+    // 큐에 태스크 추가
     taskQueue.addTasks(tasks);
-    await delay(2000);
+    console.log(`[TaskFetcher] Added ${tasks.length} tasks to queue`);
+
+    // 모든 작업 완료 대기 (큐 비어있고 처리중인 것도 없음)
+    console.log(`[TaskFetcher] Waiting for all tasks to complete...`);
+    while (!shouldStop() && !taskQueue.isAllCompleted()) {
+      await delay(5000);
+    }
+
+    if (shouldStop()) {
+      break;
+    }
+
+    console.log(`[TaskFetcher] All tasks completed. Starting 5-minute break (including IP change)...`);
+
+    const breakStartTime = Date.now();
+    const BREAK_DURATION = 5 * 60 * 1000; // 5분
+    setWaitState(breakStartTime + BREAK_DURATION, "IP 변경 및 대기 중...");
+
+    // 모든 프록시를 active 상태로 reset (순환 인덱스는 유지)
+    console.log(`[TaskFetcher] Resetting all proxies to active status...`);
+    const proxyPool = getProxyPool();
+    proxyPool.resetAllProxies();
+
+    // 모든 브라우저 IP 일괄 변경
+    console.log(`[TaskFetcher] Changing IPs for all browsers...`);
+    await changeAllBrowserIPs(browsers);
+
+    // IP 변경에 걸린 시간을 제외한 나머지 대기
+    const ipChangeElapsed = Date.now() - breakStartTime;
+    const remainingDelay = Math.max(60 * 1000, BREAK_DURATION - ipChangeElapsed);
+    console.log(`[TaskFetcher] IP change took ${Math.round(ipChangeElapsed / 1000)}s. Remaining delay: ${Math.round(remainingDelay / 1000)}s`);
+
+    // progress bar를 남은 대기 시간에 맞게 갱신
+    setWaitState(Date.now() + remainingDelay, "다음 작업 대기 중...");
+    await delay(remainingDelay);
+    clearWaitState();
+
+    console.log(`[TaskFetcher] Break finished. Fetching next batch...`);
   }
+}
+
+/**
+ * 모든 브라우저의 IP를 일괄 변경
+ */
+async function changeAllBrowserIPs(
+  browsers: CrawlerBrowser[]
+): Promise<void> {
+  const proxyPool = getProxyPool();
+
+  for (let i = 0; i < browsers.length; i++) {
+    const browser = browsers[i];
+    const groupId = browser.getProxyGroupId();
+    const groupName = browser.getProxyGroupName();
+    const profileName = browser.getProfileName();
+
+    console.log(`[IPChange] [${i + 1}/${browsers.length}] Changing IP for ${profileName} [${groupName || 'default'}]...`);
+
+    try {
+      // 기존 Proxy를 dead로 표시
+      const oldProxyId = browser.getProxyId();
+      if (oldProxyId) {
+        proxyPool.markDead(oldProxyId);
+      }
+
+      // 그룹별 새 Proxy 할당
+      const newProxy = groupId !== undefined
+        ? proxyPool.getNextProxyByGroup(groupId)
+        : proxyPool.getNextProxy();
+
+      if (!newProxy) {
+        console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - No available proxies`);
+        browser.updateStatus('error', `No available proxies in group ${groupName || 'default'}`);
+        continue;
+      }
+
+      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - New proxy: ${newProxy.ip}:${newProxy.port}`);
+
+      // 브라우저 재시작 (새 Proxy로)
+      await browser.restart(newProxy, 2);
+
+      // Proxy를 in_use로 표시
+      proxyPool.markInUse(newProxy.id);
+
+      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✓ IP change completed`);
+    } catch (error: any) {
+      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✗ IP change failed: ${error.message}`);
+      browser.updateStatus('error', `IP change failed: ${error.message}`);
+    }
+  }
+
+  console.log(`[IPChange] All browsers IP change completed`);
 }
 
 /**
@@ -392,7 +486,7 @@ export async function startCrawling(): Promise<CrawlResult[]> {
     // ========================================
 
     // Task Fetcher (Producer) 시작
-    const fetcherPromise = taskFetcher(taskQueue, batchSize);
+    const fetcherPromise = taskFetcher(taskQueue, browserManager);
 
     // Result Handler 시작
     const handlerPromise = resultHandler(taskQueue);

@@ -207,14 +207,16 @@ export async function crawlNaver(
     result: result.data || { error: true, errorMsg: "", list: [] },
   };
 
-  const todayStop = await postGoodsList(postData);
-  result.todayStop = todayStop;
+  const postResult = await postGoodsList(postData);
+  result.todayStop = postResult.todayStop;
+  result.serverTransmitted = postResult.success;
 
   // 서버 전송 결과 출력
   const statusIcon = result.success ? "✓" : "✗";
   const productCount = result.data!.list.length;
+  const transmitStatus = postResult.success ? (postResult.todayStop ? "중단" : "완료") : "실패";
   console.log(
-    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${todayStop ? "중단" : "완료"}`
+    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${transmitStatus}`
   );
 
   return result;

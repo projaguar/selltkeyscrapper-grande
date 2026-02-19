@@ -306,6 +306,39 @@ export class ProxyPool {
     this.groupCurrentIndex.clear();
     console.log('[ProxyPool] Group cache cleared');
   }
+
+  /**
+   * 모든 프록시를 active 상태로 reset (순환 인덱스는 유지)
+   * - dead, in_use 상태의 모든 프록시를 active로 변경
+   * - 5분 휴식 후 새로운 task 시작 시 호출
+   * - currentIndex는 유지 (최대한 사용했던 IP는 나중에 사용)
+   */
+  resetAllProxies(): void {
+    console.log('[ProxyPool] Resetting all proxies to active status...');
+
+    const allProxies = db.getProxies() as Proxy[];
+    let resetCount = 0;
+
+    for (const proxy of allProxies) {
+      if (proxy.status === 'dead' || proxy.status === 'in_use') {
+        db.updateProxy(proxy.id, { status: 'active' });
+        resetCount++;
+      }
+    }
+
+    console.log(`[ProxyPool] Reset ${resetCount} proxies to active status`);
+
+    // 프록시 목록 다시 로드 (currentIndex는 유지)
+    this.reload();
+
+    // 그룹별 캐시도 새로고침
+    const groupIds = Array.from(this.groupProxies.keys());
+    for (const groupId of groupIds) {
+      this.reloadGroup(groupId);
+    }
+
+    console.log(`[ProxyPool] All proxies reset complete. Current index: ${this.currentIndex}, Available proxies: ${this.proxies.length}`);
+  }
 }
 
 // 싱글톤 인스턴스

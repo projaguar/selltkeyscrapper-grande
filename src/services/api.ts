@@ -7,9 +7,12 @@ const API_BASE_URL = 'https://selltkey.com/scb/api';
 /**
  * URL 목록 가져오기
  */
-export async function getUrlList() {
+export async function getUrlList(limit?: number) {
   try {
-    const response = await fetch(`${API_BASE_URL}/getUrlList_adspower.asp`);
+    const url = limit
+      ? `${API_BASE_URL}/getUrlList_adspower.asp?limit=${limit}`
+      : `${API_BASE_URL}/getUrlList_adspower.asp`;
+    const response = await fetch(url);
 
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);

@@ -96,10 +96,6 @@ export class CrawlerBrowser {
   private blockImages: boolean = false;
   private requestInterceptionSetup: boolean = false;
 
-  // IP 로테이션 관리 (크롤링 카운트)
-  private crawlCount: number = 0;
-  private readonly maxCrawlsPerIp: number = 30;
-
   // 창 배치용 인덱스
   private readonly browserIndex: number;
 
@@ -141,10 +137,14 @@ export class CrawlerBrowser {
   }
 
   /**
-   * AdsPower 프로필에 Proxy 설정 업데이트
+   * AdsPower 프로필에 Proxy 설정 업데이트 (탭 설정도 함께 초기화)
    */
   async updateProxySettings(proxy: Proxy): Promise<void> {
     const updateData: any = {
+      domain_name: "",
+      open_urls: [],
+      homepage: "",
+      tab_urls: [],
       user_proxy_config: {
         proxy_soft: "other",
         proxy_type: "http",
@@ -333,6 +333,9 @@ export class CrawlerBrowser {
       // 중지 실패는 무시
     }
 
+    // 리소스 차단 설정 플래그 리셋 (재시작 시 다시 설정할 수 있도록)
+    this.requestInterceptionSetup = false;
+
     this.updateStatus("stopped", "중지됨");
   }
 
@@ -433,7 +436,14 @@ export class CrawlerBrowser {
       const result = await Promise.race([
         this.doValidateProxy(),
         new Promise<{ valid: false; error: string }>((resolve) =>
-          setTimeout(() => resolve({ valid: false, error: "Proxy validation timeout (10s)" }), TIMEOUT_MS)
+          setTimeout(
+            () =>
+              resolve({
+                valid: false,
+                error: "Proxy validation timeout (10s)",
+              }),
+            TIMEOUT_MS,
+          ),
         ),
       ]);
 
@@ -564,7 +574,9 @@ export class CrawlerBrowser {
     const changed = this.blockImages !== block;
     this.blockImages = block;
     if (changed) {
-      console.log(`[CrawlerBrowser] ${this.profileName} - 이미지 차단: ${block ? 'ON' : 'OFF'}`);
+      console.log(
+        `[CrawlerBrowser] ${this.profileName} - 이미지 차단: ${block ? "ON" : "OFF"}`,
+      );
     }
   }
 
@@ -573,40 +585,6 @@ export class CrawlerBrowser {
    */
   isImageBlocked(): boolean {
     return this.blockImages;
-  }
-
-  // ========================================
-  // IP 로테이션 관리
-  // ========================================
-
-  /**
-   * 크롤링 카운트 증가 (크롤링 완료 후 호출)
-   */
-  incrementCrawlCount(): void {
-    this.crawlCount++;
-    console.log(`[CrawlerBrowser] ${this.profileName} - 크롤링 카운트: ${this.crawlCount}/${this.maxCrawlsPerIp}`);
-  }
-
-  /**
-   * IP 로테이션 필요 여부 확인
-   */
-  needsIpRotation(): boolean {
-    return this.crawlCount >= this.maxCrawlsPerIp;
-  }
-
-  /**
-   * 크롤링 카운트 리셋 (IP 전환 후 호출)
-   */
-  resetCrawlCount(): void {
-    this.crawlCount = 0;
-    console.log(`[CrawlerBrowser] ${this.profileName} - 크롤링 카운트 리셋`);
-  }
-
-  /**
-   * 현재 크롤링 카운트 조회
-   */
-  getCrawlCount(): number {
-    return this.crawlCount;
   }
 
   // ========================================
@@ -653,10 +631,14 @@ export class CrawlerBrowser {
         bounds: { left, top, width, height },
       });
 
-      console.log(`[CrawlerBrowser] ${this.profileName} - 창 위치: (${left}, ${top}), 크기: ${width}x${height}`);
+      console.log(
+        `[CrawlerBrowser] ${this.profileName} - 창 위치: (${left}, ${top}), 크기: ${width}x${height}`,
+      );
     } catch (error: any) {
       // 창 위치 설정 실패는 무시 (크롤링에 영향 없음)
-      console.log(`[CrawlerBrowser] ${this.profileName} - 창 위치 설정 실패: ${error.message}`);
+      console.log(
+        `[CrawlerBrowser] ${this.profileName} - 창 위치 설정 실패: ${error.message}`,
+      );
     }
   }
 

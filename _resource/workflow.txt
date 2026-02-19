@@ -4,29 +4,22 @@
 
 - Loop Start
 
-  - Task List 가져오기 (n개)
-  - Task 가 없으면
-    - 10분간 Delay
-    - continue
+  - Task List 가져오기 (n개)  - (없으면 5분 대기 후 loop continue)
+  - 처리 현황 count reset  // 추가
 
-  - Task 병렬 처리
-  - delay (대략 8초에서 15초)
-  
-  - 완료/실패(block)된 Task 처리
-  - today stop user 처리
-  - block 브라우저 처리
+  - Loop Start 
+    - Task 병렬 처리 (동시 profile 갯수 만큼)
+    - 각 브라우저별 시작 delay (8초 ~ 15초)
+    - 완료/실패(block)된 Task 처리
+    - today stop user 처리
+    - block 브라우저 처리
 
--Loop End
+  - Loop End (가져온 테스크 모두 처리될때까지)
 
+  - 모든 브라우저에 새로운 proxy ip 설정하기
+  - 5분 delay
 
-# Taks List 가져오기 flow
-- Task 가져오기 (n개)
-
-  - List 하나도 없으면
-    - List 조회 
-    - Today Stop User 데이터 삭제  (날짜가 넘어갔으면 clearing등도 처리)
-
-  - List 있으면 최대 n개만큼 return (없으면 [])
+- Loop End
 
 
     
