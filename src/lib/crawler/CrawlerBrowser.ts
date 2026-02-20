@@ -8,9 +8,7 @@
  * - 상태 관리
  */
 
-import puppeteer from "puppeteer-core";
-import { adsPowerQueue } from "./adspower-queue";
-import * as adspower from "../../services/adspower";
+import * as gologin from "../../services/gologin";
 import type { Proxy } from "../proxy-pool";
 
 // ========================================
@@ -48,7 +46,6 @@ export interface CrawlerBrowserConfig {
   proxy?: Proxy;
   proxyGroupId?: number;
   proxyGroupName?: string;
-  browserIndex?: number; // 계단식 창 배치용 인덱스
 }
 
 // ========================================
@@ -77,7 +74,7 @@ export class CrawlerBrowser {
 
   // Browser 인스턴스
   private browser?: any; // puppeteer.Browser
-  private browserData?: any; // AdsPower API response
+  private glInstance?: any; // GologinApi instance (for exit)
 
   // 상태 정보
   private status: BrowserStatus = "idle";
@@ -96,8 +93,6 @@ export class CrawlerBrowser {
   private blockImages: boolean = false;
   private requestInterceptionSetup: boolean = false;
 
-  // 창 배치용 인덱스
-  private readonly browserIndex: number;
 
   // ========================================
   // Constructor
@@ -107,8 +102,6 @@ export class CrawlerBrowser {
     this.profileId = config.profileId;
     this.profileName = config.profileName;
     this.apiKey = config.apiKey;
-    this.browserIndex = config.browserIndex ?? 0;
-
     if (config.proxy) {
       this.assignProxy(config.proxy);
     }
@@ -126,7 +119,7 @@ export class CrawlerBrowser {
   // ========================================
 
   /**
-   * Proxy 할당 (메모리만 업데이트, AdsPower 업데이트는 updateProxySettings 호출 필요)
+   * Proxy 할당 (메모리만 업데이트, GoLogin 업데이트는 updateProxySettings 호출 필요)
    */
   private assignProxy(proxy: Proxy): void {
     this.proxyId = proxy.id;
@@ -137,63 +130,38 @@ export class CrawlerBrowser {
   }
 
   /**
-   * AdsPower 프로필에 Proxy 설정 업데이트 (탭 설정도 함께 초기화)
+   * GoLogin 프로필에 Proxy 설정 업데이트
    */
   async updateProxySettings(proxy: Proxy): Promise<void> {
-    const updateData: any = {
-      domain_name: "",
-      open_urls: [],
-      homepage: "",
-      tab_urls: [],
-      user_proxy_config: {
-        proxy_soft: "other",
-        proxy_type: "http",
-        proxy_host: proxy.ip,
-        proxy_port: proxy.port,
-      },
+    const proxyData = {
+      mode: 'http',
+      host: proxy.ip,
+      port: parseInt(proxy.port, 10),
+      username: proxy.username || '',
+      password: proxy.password || '',
     };
 
-    if (proxy.username) {
-      updateData.user_proxy_config.proxy_user = proxy.username;
-    }
-    if (proxy.password) {
-      updateData.user_proxy_config.proxy_password = proxy.password;
-    }
-
-    const result = await adspower.updateProfile(
-      this.apiKey,
-      this.profileId,
-      updateData,
-    );
-
-    if (result.code !== 0) {
-      throw new Error(`Failed to update proxy: ${result.msg}`);
-    }
+    await gologin.changeProfileProxy(this.apiKey, this.profileId, proxyData);
 
     // 성공 시 메모리 업데이트
     this.assignProxy(proxy);
   }
 
   /**
-   * AdsPower 프로필의 탭 설정 초기화 (빈 탭 1개만 열림)
+   * 프로필 핑거프린트 설정 강화 (webRTC, canvas, webGL 등)
+   */
+  async hardenFingerprint(): Promise<void> {
+    const { updated, changes } = await gologin.hardenProfile(this.apiKey, this.profileId);
+    if (updated) {
+      console.log(`[CrawlerBrowser] ${this.profileName} - 핑거프린트 강화: ${changes.join(', ')}`);
+    }
+  }
+
+  /**
+   * GoLogin은 항상 클린 브라우저를 실행하므로 탭 설정 초기화 불필요 (no-op)
    */
   async clearTabSettings(): Promise<void> {
-    const updateData = {
-      domain_name: "",
-      open_urls: [],
-      homepage: "",
-      tab_urls: [],
-    };
-
-    const result = await adspower.updateProfile(
-      this.apiKey,
-      this.profileId,
-      updateData,
-    );
-
-    if (result.code !== 0) {
-      throw new Error(`Failed to clear tab settings: ${result.msg}`);
-    }
+    // GoLogin launches clean - no action needed
   }
 
   // ========================================
@@ -201,76 +169,37 @@ export class CrawlerBrowser {
   // ========================================
 
   /**
-   * 브라우저 시작 (AdsPower + Puppeteer 연결)
+   * 브라우저 시작 (GoLogin SDK)
    */
   async start(options?: {
     validateConnection?: boolean;
     validateProxy?: boolean;
   }): Promise<void> {
-    const validateConnection = options?.validateConnection ?? false;
     const validateProxy = options?.validateProxy ?? false;
+    const validateConnection = options?.validateConnection ?? false;
 
     this.updateStatus("starting", "브라우저 시작 중...");
 
     try {
-      // 1. AdsPower 브라우저 시작
-      const startResult = await adsPowerQueue.startBrowser(
+      // 1. GoLogin SDK로 브라우저 실행 (SDK가 puppeteer Browser를 직접 반환)
+      const { browser, glInstance } = await gologin.launchBrowser(
         this.apiKey,
         this.profileId,
       );
 
-      if (startResult.code !== 0) {
-        throw new Error(
-          `AdsPower API failed: ${startResult.msg} (code: ${startResult.code})`,
-        );
-      }
+      this.browser = browser;
+      this.glInstance = glInstance;
 
-      const wsUrl = startResult.data?.ws?.puppeteer;
-      if (!wsUrl) {
-        throw new Error("WebSocket URL not found in AdsPower response");
-      }
-
-      // 2. Puppeteer 연결
-      this.browser = await puppeteer.connect({
-        browserWSEndpoint: wsUrl,
-        defaultViewport: null,
-      });
-      this.browserData = startResult.data;
-
-      // 3. 브라우저 초기화 대기
+      // 2. 브라우저 초기화 대기
       await this.delay(2000);
 
-      // 4. 탭 정리 (1개만 유지)
+      // 3. 탭 정리 (1개만 유지)
       await this.cleanupTabs();
 
-      // 5. 창 위치/크기 설정 (계단식 배치)
-      await this.setupWindowPosition();
-
-      // 6. 리소스 차단 설정 (실시간 제어 가능)
+      // 4. 리소스 차단 설정 (실시간 제어 가능)
       await this.setupResourceBlocking();
 
-      // 6. AdsPower에 설정된 실제 프록시 정보 동기화
-      try {
-        const profileInfo = await this.getProfileInfo();
-        if (profileInfo.user_proxy_config) {
-          const proxyConfig = profileInfo.user_proxy_config;
-
-          if (proxyConfig.proxy_soft === "luminati") {
-            const host = proxyConfig.host || "";
-            const ipMatch = host.match(/(\d+\.\d+\.\d+\.\d+)/);
-            if (ipMatch) {
-              this.proxyIp = ipMatch[1];
-            }
-          } else if (proxyConfig.proxy_host) {
-            this.proxyIp = proxyConfig.proxy_host;
-            this.proxyPort = proxyConfig.proxy_port;
-          }
-        }
-      } catch {
-        // 프록시 정보 동기화 실패는 무시
-      }
-
-      // 7. 프록시 검증 (선택적)
+      // 6. 프록시 검증 (선택적)
       let proxyValidated = false;
       if (validateProxy) {
         const maxRetries = 2;
@@ -299,7 +228,7 @@ export class CrawlerBrowser {
         }
       }
 
-      // 8. 연결 테스트 (프록시 검증이 성공했으면 스킵)
+      // 7. 연결 테스트 (프록시 검증이 성공했으면 스킵)
       if (validateConnection && !proxyValidated) {
         await this.testConnection();
       }
@@ -313,25 +242,51 @@ export class CrawlerBrowser {
   }
 
   /**
-   * 브라우저 중지 (Puppeteer 연결 해제 + AdsPower 중지)
+   * 브라우저 중지 (GoLogin SDK exit)
    */
   async stop(): Promise<void> {
-    // Puppeteer 연결 해제
+    // 종료 전 안전한 페이지로 이동 (세션 복원 시 크롤링 페이지 대신 example.com 열리도록)
     if (this.browser) {
       try {
-        await this.browser.disconnect();
-      } catch {
-        // 연결 해제 실패는 무시
+        const pages = await this.browser.pages();
+        if (pages.length > 0) {
+          await pages[0].evaluate(() => window.stop()).catch(() => {});
+          await pages[0].goto('https://www.example.com', {
+            waitUntil: 'domcontentloaded',
+            timeout: 10000,
+          });
+          console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 example.com 이동 완료`);
+        }
+      } catch (e: any) {
+        console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 example.com 이동 실패: ${e.message}`);
       }
-      this.browser = undefined;
     }
 
-    // AdsPower 브라우저 중지
-    try {
-      await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
-    } catch {
-      // 중지 실패는 무시
+    // GoLogin SDK exit 호출 (내부적으로 browser.close() + stopLocal 수행)
+    if (this.glInstance) {
+      try {
+        await gologin.exitBrowser(this.glInstance);
+      } catch {
+        // 종료 실패 시 puppeteer로 직접 종료 시도
+        if (this.browser) {
+          try {
+            await this.browser.close();
+          } catch {
+            // 무시
+          }
+        }
+      }
+      this.glInstance = undefined;
+    } else if (this.browser) {
+      // glInstance 없으면 puppeteer로 직접 종료
+      try {
+        await this.browser.close();
+      } catch {
+        // 무시
+      }
     }
+
+    this.browser = undefined;
 
     // 리소스 차단 설정 플래그 리셋 (재시작 시 다시 설정할 수 있도록)
     this.requestInterceptionSetup = false;
@@ -340,12 +295,12 @@ export class CrawlerBrowser {
   }
 
   /**
-   * 브라우저 재시작 (중복 방지)
+   * 브라우저 재시작 (stop → 프록시 설정 → start, 단일 시도)
+   * 재시도는 호출자(handleBrowserRestart)가 다른 프록시로 담당.
    */
-  async restart(newProxy?: Proxy, maxRetries: number = 3): Promise<void> {
+  async restart(newProxy?: Proxy): Promise<void> {
     // 중복 재시작 방지
     if (this.isRestarting) {
-      // 최대 30초 대기
       for (let i = 0; i < 30; i++) {
         await this.delay(1000);
         if (!this.isRestarting) {
@@ -359,34 +314,14 @@ export class CrawlerBrowser {
     this.updateStatus("restarting", "재시작 중...");
 
     try {
-      // 1. 기존 브라우저 중지
       await this.stop();
       await this.delay(2000);
 
-      // 2. Proxy 업데이트 (새 Proxy가 제공된 경우)
       if (newProxy) {
         await this.updateProxySettings(newProxy);
-        await this.delay(2000);
       }
 
-      // 3. 브라우저 재시작 (재시도 로직)
-      let lastError: Error | undefined;
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          await this.start({ validateProxy: true, validateConnection: false });
-          return;
-        } catch (error: any) {
-          lastError = error;
-
-          if (attempt < maxRetries) {
-            const backoffMs = Math.min(Math.pow(2, attempt) * 1500, 30000);
-            await this.delay(backoffMs);
-          }
-        }
-      }
-
-      // 모든 재시도 실패
-      throw new Error(`Restart failed: ${lastError?.message}`);
+      await this.start({ validateProxy: false, validateConnection: false });
     } finally {
       this.isRestarting = false;
     }
@@ -502,17 +437,6 @@ export class CrawlerBrowser {
     }
   }
 
-  /**
-   * 프로필 정보 조회 (AdsPower API)
-   */
-  async getProfileInfo(): Promise<any> {
-    const result = await adspower.getProfile(this.apiKey, this.profileId);
-    if (result.code !== 0) {
-      throw new Error(`Failed to get profile info: ${result.msg}`);
-    }
-    return result.data;
-  }
-
   // ========================================
   // Browser 조작
   // ========================================
@@ -592,57 +516,6 @@ export class CrawlerBrowser {
   // ========================================
 
   /**
-   * 브라우저 창 위치 및 크기 설정 (계단식 배치)
-   * - 해상도: 1366x768 (일반 사무용 노트북)
-   * - 계단식 오프셋: 30px (타이틀 바 높이)
-   * - 최대 10개까지 순환 (화면 밖으로 나가지 않도록)
-   */
-  private async setupWindowPosition(): Promise<void> {
-    if (!this.browser) return;
-
-    try {
-      const page = await this.getPage();
-
-      // 계단식 배치 계산 (최대 10개까지 순환)
-      const maxSlots = 10;
-      const slotIndex = this.browserIndex % maxSlots;
-
-      const offsetX = 30;
-      const offsetY = 30;
-      const startX = 50;
-      const startY = 50;
-
-      const left = startX + slotIndex * offsetX;
-      const top = startY + slotIndex * offsetY;
-
-      // 일반적인 브라우저 사용 크기
-      const width = 1024;
-      const height = 700;
-
-      // CDP 세션으로 창 위치/크기 설정
-      const client = await page.target().createCDPSession();
-
-      // 현재 윈도우 ID 가져오기
-      const { windowId } = await client.send("Browser.getWindowForTarget");
-
-      // 창 위치/크기 설정
-      await client.send("Browser.setWindowBounds", {
-        windowId,
-        bounds: { left, top, width, height },
-      });
-
-      console.log(
-        `[CrawlerBrowser] ${this.profileName} - 창 위치: (${left}, ${top}), 크기: ${width}x${height}`,
-      );
-    } catch (error: any) {
-      // 창 위치 설정 실패는 무시 (크롤링에 영향 없음)
-      console.log(
-        `[CrawlerBrowser] ${this.profileName} - 창 위치 설정 실패: ${error.message}`,
-      );
-    }
-  }
-
-  /**
    * 탭 정리 (첫 번째 탭만 유지)
    */
   private async cleanupTabs(): Promise<void> {
@@ -660,7 +533,20 @@ export class CrawlerBrowser {
   }
 
   /**
-   * Keepalive (WebSocket 연결 유지)
+   * 브라우저 프로세스가 살아있는지 확인
+   */
+  async isAlive(): Promise<boolean> {
+    if (!this.browser) return false;
+    try {
+      await this.browser.pages();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Keepalive (WebSocket 연결 유지 + 죽음 감지)
    */
   async keepalive(): Promise<void> {
     if (!this.browser) return;
@@ -668,7 +554,14 @@ export class CrawlerBrowser {
     try {
       await this.browser.pages();
     } catch {
-      // Keepalive 실패는 무시
+      // 연결 실패 → 브라우저 죽음 감지 (restarting 중이면 무시)
+      if (this.status !== 'error' && this.status !== 'restarting' && this.status !== 'stopped') {
+        console.log(`[CrawlerBrowser] ${this.profileName} - keepalive 실패, 브라우저 죽음 감지`);
+        this.browser = undefined;
+        this.glInstance = undefined;
+        this.requestInterceptionSetup = false;
+        this.updateStatus('error', 'Browser process died');
+      }
     }
   }
 
@@ -792,6 +685,10 @@ export class CrawlerBrowser {
   setProxyGroup(groupId: number, groupName: string): void {
     this.proxyGroupId = groupId;
     this.proxyGroupName = groupName;
+  }
+
+  getApiKey(): string {
+    return this.apiKey;
   }
 
   // ========================================

@@ -1,5 +1,5 @@
 import { getProxyPool } from './proxy-pool';
-import * as adspower from '../services/adspower';
+import * as gologin from '../services/gologin';
 import * as db from '../database/sqlite';
 
 interface Session {
@@ -35,11 +35,12 @@ export class SessionManager {
    * 모든 Profile 조회
    */
   async loadProfiles() {
-    const result = await adspower.listProfiles(this.apiKey);
-    if (result.code !== 0) {
-      throw new Error(`Failed to load profiles: ${result.msg}`);
+    const result = await gologin.listProfiles(this.apiKey);
+    // GoLogin returns array directly or { profiles: [...] }
+    if (Array.isArray(result)) {
+      return result;
     }
-    return result.data.list || [];
+    return result.profiles || result.data?.list || [];
   }
 
   /**
@@ -55,34 +56,16 @@ export class SessionManager {
 
     console.log(`[SessionManager] Assigning proxy ${proxy.ip}:${proxy.port} to profile ${profileName}`);
 
-    // AdsPower Profile에 Proxy 설정 업데이트
-    const updateData: any = {
-      user_proxy_config: {
-        proxy_soft: 'other',
-        proxy_type: 'http',
-        proxy_host: proxy.ip,
-        proxy_port: proxy.port,
-      },
-      // 모든 시작 URL 관련 설정 초기화 (빈 탭 1개만 열림)
-      domain_name: '',  // 계정 플랫폼 제거
-      open_urls: [],
-      homepage: '',
-      tab_urls: [],
+    // GoLogin Profile에 Proxy 설정 업데이트
+    const proxyData = {
+      mode: 'http',
+      host: proxy.ip,
+      port: parseInt(proxy.port, 10),
+      username: proxy.username || '',
+      password: proxy.password || '',
     };
 
-    // username/password가 있으면 추가
-    if (proxy.username) {
-      updateData.user_proxy_config.proxy_user = proxy.username;
-    }
-    if (proxy.password) {
-      updateData.user_proxy_config.proxy_password = proxy.password;
-    }
-
-    const result = await adspower.updateProfile(this.apiKey, profileId, updateData);
-
-    if (result.code !== 0) {
-      throw new Error(`Failed to update profile proxy: ${result.msg}`);
-    }
+    await gologin.changeProfileProxy(this.apiKey, profileId, proxyData);
 
     // 세션 생성
     const session: Session = {
@@ -147,11 +130,7 @@ export class SessionManager {
         results.push({ success: false, profileId: profile.user_id, error: error.message });
       }
 
-      // AdsPower API rate limiting 방지: 각 프로필 할당 사이에 1초 딜레이
-      if (i < profiles.length - 1) {
-        console.log(`[SessionManager] Waiting 1s before next profile... (${i + 1}/${profiles.length})`);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      // GoLogin has 300 RPM - no delay needed between assignments
     }
 
     return results;

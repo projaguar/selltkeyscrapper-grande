@@ -22,7 +22,9 @@ export async function getUrlList(limit?: number) {
 
     let data;
     try {
-      data = JSON.parse(text);
+      // 서버가 item 빈 값으로 보내는 경우 보정 ("item":} → "item":[]}
+      const sanitized = text.replace(/"item"\s*:\s*}/g, '"item":[]}');
+      data = JSON.parse(sanitized);
     } catch (parseError) {
       console.error('[API] JSON 파싱 오류 - 서버 원본 응답:');
       console.error('='.repeat(50));

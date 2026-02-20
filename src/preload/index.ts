@@ -5,14 +5,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 앱 경로 가져오기
   getAppPath: () => ipcRenderer.invoke('get-app-path'),
 
-  // AdsPower API 호출
-  adspower: {
-    listProfiles: (apiKey: string) => ipcRenderer.invoke('adspower-list-profiles', apiKey),
-    createProfile: (apiKey: string, data: any) => ipcRenderer.invoke('adspower-create-profile', apiKey, data),
-    deleteProfiles: (apiKey: string, profileIds: string[]) => ipcRenderer.invoke('adspower-delete-profiles', apiKey, profileIds),
-    startBrowser: (apiKey: string, profileId: string) => ipcRenderer.invoke('adspower-start-browser', apiKey, profileId),
-    stopBrowser: (apiKey: string, profileId: string) => ipcRenderer.invoke('adspower-stop-browser', apiKey, profileId),
-    puppeteerTest: (apiKey: string, profileId: string) => ipcRenderer.invoke('adspower-puppeteer-test', apiKey, profileId),
+  // GoLogin API 호출
+  gologin: {
+    listProfiles: (apiKey: string) => ipcRenderer.invoke('gologin-list-profiles', apiKey),
+    createProfile: (apiKey: string, name: string) => ipcRenderer.invoke('gologin-create-profile', apiKey, name),
+    getProfile: (apiKey: string, profileId: string) => ipcRenderer.invoke('gologin-get-profile', apiKey, profileId),
+    updateProfile: (apiKey: string, profileId: string, data: any) => ipcRenderer.invoke('gologin-update-profile', apiKey, profileId, data),
+    deleteProfiles: (apiKey: string, profileIds: string[]) => ipcRenderer.invoke('gologin-delete-profiles', apiKey, profileIds),
   },
 
   // SQLite 데이터베이스
@@ -59,12 +58,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('session-get-all', apiKey),
     replaceProxy: (apiKey: string, profileId: string) =>
       ipcRenderer.invoke('session-replace-proxy', apiKey, profileId),
-  },
-
-  // Browser Verification
-  browser: {
-    startAndVerify: (apiKey: string, profileId: string, profileName: string, maxRetries?: number) =>
-      ipcRenderer.invoke('browser-start-and-verify', apiKey, profileId, profileName, maxRetries),
   },
 
   // Server API

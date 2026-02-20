@@ -15,7 +15,6 @@ type BrowserStatus =
   | 'preparing';     // 브라우저 준비 중
 
 interface BrowserStatusInfo {
-  browserIndex: number;
   profileName: string;
   status: BrowserStatus;
   storeName?: string;
@@ -49,7 +48,7 @@ interface PreparationResult {
 }
 
 function Dashboard() {
-  const { apiKey, proxies, profiles } = useStore();
+  const { apiKey, proxies, goLoginProfiles } = useStore();
   const [progress, setProgress] = useState<CrawlerProgress | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isCrawling, setIsCrawling] = useState(false);
@@ -109,7 +108,7 @@ function Dashboard() {
 
   // 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
   const handlePrepareBrowsers = async () => {
-    if (profiles.length === 0) {
+    if (goLoginProfiles.length === 0) {
       alert('⚠️ 시작할 프로필이 없습니다.');
       return;
     }
@@ -117,8 +116,7 @@ function Dashboard() {
     setIsPreparing(true);
 
     // 초기 준비 상태 설정 (모든 프로필 대기 중)
-    const initialStatuses: BrowserStatusInfo[] = profiles.map((profile, index) => ({
-      browserIndex: index,
+    const initialStatuses: BrowserStatusInfo[] = goLoginProfiles.map((profile) => ({
       profileName: profile.name,
       status: 'waiting' as BrowserStatus,
       message: '대기 중...',
@@ -151,14 +149,14 @@ function Dashboard() {
       });
       removeProgressListenerRef.current = removeListener;
 
-      // 프로필 목록 준비
-      const profileList = profiles.map(p => ({
-        user_id: p.user_id,
+      // 프로필 목록 준비 (GoLogin 'id' → crawler expects 'user_id')
+      const profileList = goLoginProfiles.map(p => ({
+        user_id: p.id,
         name: p.name,
       }));
 
       // BrowserManager를 통해 브라우저 준비
-      console.log('\n🔧 Preparing browsers with BrowserManager...');
+      console.log(`\n🔧 Preparing browsers with BrowserManager...`);
       const result = await window.electronAPI.crawler.prepareBrowsers(apiKey, profileList);
 
       // 리스너 제거
@@ -167,7 +165,7 @@ function Dashboard() {
 
       if (result.success) {
         const successCount = result.readyCount || 0;
-        const failCount = profiles.length - successCount;
+        const failCount = goLoginProfiles.length - successCount;
         setReadyBrowserCount(successCount);
 
         alert(
@@ -288,11 +286,12 @@ function Dashboard() {
     <div className="p-8">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-3xl font-bold">대시보드</h2>
-        <div className="flex gap-3">
+        <div className="flex gap-3 items-center">
+
           {/* 브라우저 준비 버튼 */}
           <Button
             onClick={handlePrepareBrowsers}
-            disabled={isPreparing || isCrawling || profiles.length === 0}
+            disabled={isPreparing || isCrawling || goLoginProfiles.length === 0}
             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6"
           >
             {isPreparing ? '⏳ 준비 중...' : '🔗 브라우저 준비'}
@@ -343,7 +342,7 @@ function Dashboard() {
       <div className="grid grid-cols-2 gap-6 mb-8">
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="text-sm text-gray-500 mb-2">전체 프로필</div>
-          <div className="text-3xl font-bold">{profiles.length}</div>
+          <div className="text-3xl font-bold">{goLoginProfiles.length}</div>
         </div>
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="text-sm text-gray-500 mb-2">활성 프록시</div>
@@ -461,7 +460,7 @@ function Dashboard() {
                 <div className="space-y-2">
                   {progress.browserStatuses.map((browser) => (
                     <div
-                      key={browser.browserIndex}
+                      key={browser.profileName}
                       className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
                     >
                       <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -543,7 +542,7 @@ function Dashboard() {
           <div className="space-y-2">
             {preparingStatuses.map((browser) => (
               <div
-                key={browser.browserIndex}
+                key={browser.profileName}
                 className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
               >
                 <div className="flex items-center gap-3 flex-1 min-w-0">

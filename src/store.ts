@@ -26,10 +26,21 @@ interface Proxy {
   created_at: string;
 }
 
-interface Profile {
-  user_id: string;
+export interface GoLoginProfile {
+  id: string;
   name: string;
-  group_name?: string;
+  os: string;
+  browserType: string;
+  notes?: string;
+  proxy?: {
+    mode: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+  };
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface Session {
@@ -71,9 +82,9 @@ interface Store {
   updateProxy: (id: number, updates: Partial<Proxy>) => void;
   deleteProxy: (id: number) => void;
 
-  // AdsPower 프로필 목록
-  profiles: Profile[];
-  setProfiles: (profiles: Profile[]) => void;
+  // GoLogin 프로필 목록
+  goLoginProfiles: GoLoginProfile[];
+  setGoLoginProfiles: (profiles: GoLoginProfile[]) => void;
 
   // 브라우저 세션 상태
   activeSessions: Session[];
@@ -127,9 +138,9 @@ export const useStore = create<Store>((set) => ({
       proxies: state.proxies.filter((p) => p.id !== id),
     })),
 
-  // AdsPower 프로필 목록
-  profiles: [],
-  setProfiles: (profiles) => set({ profiles }),
+  // GoLogin 프로필 목록
+  goLoginProfiles: [],
+  setGoLoginProfiles: (goLoginProfiles) => set({ goLoginProfiles }),
 
   // 브라우저 세션 상태
   activeSessions: [],

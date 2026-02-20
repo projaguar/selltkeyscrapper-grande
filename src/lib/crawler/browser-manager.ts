@@ -9,6 +9,7 @@
 
 import { CrawlerBrowser, type BrowserStatusInfo } from "./CrawlerBrowser";
 import { getProxyPool } from "../proxy-pool";
+import * as gologin from "../../services/gologin";
 import * as db from "../../database/sqlite";
 
 // 프로필 정보
@@ -30,7 +31,6 @@ export interface PreparationResult {
 class BrowserManager {
   private browsers: Map<string, CrawlerBrowser> = new Map();
   private apiKey: string = "";
-
   /**
    * API Key 설정
    */
@@ -54,6 +54,9 @@ class BrowserManager {
   ): Promise<PreparationResult[]> {
     const results: PreparationResult[] = [];
     const proxyPool = getProxyPool();
+
+    // 모든 프록시 활성화 (dead/in_use → active, 순환 인덱스 유지)
+    proxyPool.resetAllProxies();
 
     // 기존 브라우저 정리
     await this.clear();
@@ -99,37 +102,57 @@ class BrowserManager {
 
     console.log(`[BrowserManager] Group assignments: ${groupAssignments.map((g) => g.groupName).join(", ")} (${groupAssignments.length}/${profiles.length})`);
 
-    // 할당된 프로필에 대해서만 브라우저 준비
-    for (let i = 0; i < groupAssignments.length; i++) {
-      const profile = profiles[i];
-      const assignment = groupAssignments[i];
+    // 할당된 프로필에 대해서만 브라우저 준비 (병렬, concurrency=10)
+    const BATCH_SIZE = 10;
+    for (let batchStart = 0; batchStart < groupAssignments.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, groupAssignments.length);
+      const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, k) => batchStart + k);
 
-      console.log(`[BrowserManager] Preparing browser ${i + 1}/${groupAssignments.length}: ${profile.name} [${assignment.groupName}]`);
-
-      // CrawlerBrowser 생성
-      const browser = new CrawlerBrowser({
-        profileId: profile.user_id,
-        profileName: profile.name,
-        apiKey: this.apiKey,
-        proxyGroupId: assignment.groupId,
-        proxyGroupName: assignment.groupName,
-        browserIndex: i, // 계단식 창 배치용
-      });
-
-      // 프록시 할당 + 브라우저 시작 + 테스트 (최대 10회 재시도)
-      const result = await this.prepareWithRetry(browser, assignment.groupId, assignment.groupName, proxyPool);
-
-      results.push(result);
-
-      // 성공 시 저장
-      if (result.success) {
-        this.browsers.set(profile.user_id, browser);
+      // 첫 배치가 아니면 5초 대기 (GoLogin API 부하 방지)
+      if (batchStart > 0) {
+        console.log(`[BrowserManager] Waiting 5s before next batch...`);
+        await this.delay(5000);
       }
 
-      // 진행 상황 콜백
-      if (onProgress) {
-        onProgress(i, profiles.length, result);
-      }
+      console.log(`[BrowserManager] Processing batch ${batchStart + 1}-${batchEnd}/${groupAssignments.length}`);
+
+      await Promise.all(batchIndices.map(async (i) => {
+        const profile = profiles[i];
+        const assignment = groupAssignments[i];
+
+        console.log(`[BrowserManager] Preparing browser ${i + 1}/${groupAssignments.length}: ${profile.name} [${assignment.groupName}]`);
+
+        // CrawlerBrowser 생성
+        const browser = new CrawlerBrowser({
+          profileId: profile.user_id,
+          profileName: profile.name,
+          apiKey: this.apiKey,
+          proxyGroupId: assignment.groupId,
+          proxyGroupName: assignment.groupName,
+        });
+
+        // 핑거프린트 안티디텍션 설정 강화 (최초 1회만 실제 업데이트)
+        try {
+          await browser.hardenFingerprint();
+        } catch (e: any) {
+          console.log(`[BrowserManager] ${profile.name} - 핑거프린트 강화 실패 (무시): ${e.message}`);
+        }
+
+        // 프록시 할당 + 브라우저 시작 + 테스트 (최대 10회 재시도)
+        const result = await this.prepareWithRetry(browser, assignment.groupId, assignment.groupName, proxyPool);
+
+        results.push(result);
+
+        // 성공 시 저장
+        if (result.success) {
+          this.browsers.set(profile.user_id, browser);
+        }
+
+        // 진행 상황 콜백
+        if (onProgress) {
+          onProgress(i, profiles.length, result);
+        }
+      }));
     }
 
     // 그룹 용량 초과로 할당되지 않은 프로필은 실패 처리
@@ -194,8 +217,8 @@ class BrowserManager {
         // 탭 설정 초기화
         await browser.clearTabSettings();
 
-        // 브라우저 시작 + 프록시 테스트
-        await browser.start({ validateProxy: true, validateConnection: false });
+        // 브라우저 시작 (프록시 검증은 크롤링 시작 시 수행)
+        await browser.start({ validateProxy: false, validateConnection: false });
 
         console.log(`[BrowserManager] ${profileName} [${groupName}] - ✓ 준비 완료: ${proxy.ip}:${proxy.port}`);
 
@@ -207,12 +230,17 @@ class BrowserManager {
           proxyIp: `${proxy.ip}:${proxy.port}`,
         };
       } catch (error: any) {
-        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✗ 시도 ${attempt} 실패: ${error.message}`);
+        const msg = error.message || '';
+        const isProxyError = this.isProxyRelatedError(msg);
 
-        // 기존 프록시 dead 처리
-        const oldProxyId = browser.getProxyId();
-        if (oldProxyId) {
-          proxyPool.markDead(oldProxyId);
+        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✗ 시도 ${attempt} 실패: ${msg} [${isProxyError ? 'PROXY' : 'CODE'}]`);
+
+        // 프록시 관련 오류만 dead 처리
+        if (isProxyError) {
+          const oldProxyId = browser.getProxyId();
+          if (oldProxyId) {
+            proxyPool.markDead(oldProxyId);
+          }
         }
 
         // 브라우저 종료
@@ -220,6 +248,17 @@ class BrowserManager {
           await browser.stop();
         } catch {
           // 무시
+        }
+
+        // 코드/API 오류는 프록시 변경 없이 재시도 무의미 → 즉시 실패
+        if (!isProxyError) {
+          return {
+            success: false,
+            profileId,
+            profileName,
+            proxyGroupName: groupName,
+            error: msg,
+          };
         }
 
         // 재시작 전 잠시 대기 (1.5초)
@@ -299,6 +338,95 @@ class BrowserManager {
         // 무시
       }
     }
+  }
+
+  /**
+   * 브라우저 인스턴스 교체 (프로필 재생성 시 Map 키 변경)
+   */
+  replaceBrowser(oldProfileId: string, newBrowser: CrawlerBrowser): void {
+    this.browsers.delete(oldProfileId);
+    this.browsers.set(newBrowser.getProfileId(), newBrowser);
+    console.log(`[BrowserManager] Browser replaced: ${oldProfileId} → ${newBrowser.getProfileId()}`);
+  }
+
+  /**
+   * 프로필 재생성 (CAPTCHA 차단 시 완전한 새 identity)
+   * 순서: 새 프로필 생성 → 핑거프린트 강화 → 새 CrawlerBrowser 반환 → 구 프로필 삭제
+   */
+  async recreateProfile(oldBrowser: CrawlerBrowser): Promise<CrawlerBrowser> {
+    const oldProfileId = oldBrowser.getProfileId();
+    const profileName = oldBrowser.getProfileName();
+    const proxyGroupId = oldBrowser.getProxyGroupId();
+    const proxyGroupName = oldBrowser.getProxyGroupName();
+
+    console.log(`[BrowserManager] Recreating profile for ${profileName} (old: ${oldProfileId})`);
+
+    // 1. 구 브라우저 종료
+    try {
+      await oldBrowser.stop();
+    } catch {
+      // 이미 죽어있을 수 있음
+    }
+
+    // 2. 새 프로필 생성 (GoLogin API)
+    const newProfile = await gologin.createProfile(this.apiKey, profileName);
+    const newProfileId = newProfile.id;
+    console.log(`[BrowserManager] New profile created: ${newProfileId} (name: ${profileName})`);
+
+    // 3. 핑거프린트 강화
+    try {
+      await gologin.hardenProfile(this.apiKey, newProfileId);
+    } catch (e: any) {
+      console.log(`[BrowserManager] Harden failed for new profile (무시): ${e.message}`);
+    }
+
+    // 4. 새 CrawlerBrowser 인스턴스 생성
+    const newBrowser = new CrawlerBrowser({
+      profileId: newProfileId,
+      profileName,
+      apiKey: this.apiKey,
+      proxyGroupId,
+      proxyGroupName,
+    });
+
+    // 5. Map 교체
+    this.replaceBrowser(oldProfileId, newBrowser);
+
+    // 6. 구 프로필 삭제 (안전하게 마지막에)
+    try {
+      await gologin.deleteProfile(this.apiKey, oldProfileId);
+      console.log(`[BrowserManager] Old profile deleted: ${oldProfileId}`);
+    } catch (e: any) {
+      console.log(`[BrowserManager] Old profile delete failed (무시): ${e.message}`);
+    }
+
+    return newBrowser;
+  }
+
+  /**
+   * 프록시 관련 오류인지 판별
+   * - 프록시 오류: 연결 실패, 타임아웃, 인증 실패, IP 검증 실패 등
+   * - 코드/API 오류: SDK 오류, 함수 없음, 프로필 미존재 등
+   */
+  private isProxyRelatedError(message: string): boolean {
+    const proxyPatterns = [
+      /proxy/i,
+      /ECONNREFUSED/i,
+      /ECONNRESET/i,
+      /ETIMEDOUT/i,
+      /ENOTFOUND/i,
+      /tunnel/i,
+      /socket hang up/i,
+      /connection.*(?:refused|reset|timeout|failed)/i,
+      /net::ERR_/i,
+      /Failed to retrieve IP/i,
+      /Proxy validation/i,
+      /Request timeout/i,
+      /timeout after/i,
+      /407/,  // Proxy Authentication Required
+    ];
+
+    return proxyPatterns.some(p => p.test(message));
   }
 
   private delay(ms: number): Promise<void> {

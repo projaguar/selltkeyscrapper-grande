@@ -113,39 +113,72 @@ function classifyResult(
   };
 }
 
+// Mutable wrapper: worker가 프로필 재생성 후 새 CrawlerBrowser를 사용할 수 있게 함
+interface BrowserHolder {
+  browser: CrawlerBrowser;
+}
+
+// 브라우저 죽음을 감지하는 에러 패턴
+const DEAD_BROWSER_PATTERNS = [
+  'Browser not available',
+  'No pages available',
+  'Browser not started',
+  'Target closed',
+  'Session closed',
+  'Protocol error',
+  'Browser process died',
+];
+
 /**
  * =====================================================
  * Browser Worker (Consumer) - DDD 패턴 적용
  * =====================================================
  * 각 브라우저가 독립적으로 Task Queue에서 Task를 가져와 처리
+ * BrowserHolder를 통해 프로필 재생성 시 새 인스턴스로 교체 가능
  */
 async function browserWorker(
-  browser: CrawlerBrowser,
+  holder: BrowserHolder,
   workerIndex: number,
   taskQueue: TaskQueueManager
 ): Promise<void> {
-  const profileName = browser.getProfileName();
-
   // 시작 시 Random Delay (0~15초)
   const initialDelayMs = Math.floor(Math.random() * 15000);
   await delay(initialDelayMs);
 
-  while (!shouldStop()) {
-    // Queue에서 Task 가져오기
-    const task = taskQueue.getNext();
+  let consecutiveDeadErrors = 0;
+  const MAX_DEAD_ERRORS = 2;
 
-    // Task 없으면 10초 대기 후 재시도
-    if (!task) {
-      browser.updateStatus('waiting', 'Task 대기 중...');
-      await delay(10000);
+  while (!shouldStop()) {
+    const browser = holder.browser;
+    const profileName = browser.getProfileName();
+
+    // 재시작 중이면 대기
+    if (browser.getStatus().status === 'restarting') {
+      await delay(3000);
       continue;
     }
 
-    // 브라우저 에러 시 Task 실패 처리
+    // 브라우저 에러 시 자동 복구 시도
     if (browser.hasError()) {
-      const errorMsg = browser.getStatus().error || 'Browser error';
-      taskQueue.markFailed(task, errorMsg);
-      browser.updateStatus('error', errorMsg);
+      console.log(`[Worker ${workerIndex}] ${profileName} - 에러 상태 감지, 자동 복구 시도`);
+      if (!shouldStop()) {
+        await handleBrowserRestart(holder, workerIndex, '브라우저 에러 복구');
+      }
+      consecutiveDeadErrors = 0;
+      // 복구 후 잠시 대기
+      await delay(3000);
+      continue;
+    }
+
+    // Queue에서 Task 가져오기
+    const task = taskQueue.getNext();
+
+    // Task 없으면 짧게 대기 후 재시도 (중지 신호 빠르게 반응)
+    if (!task) {
+      browser.updateStatus('waiting', 'Task 대기 중...');
+      for (let i = 0; i < 10 && !shouldStop(); i++) {
+        await delay(1000);
+      }
       continue;
     }
 
@@ -155,6 +188,9 @@ async function browserWorker(
     try {
       // Task 처리
       const result = await processSingleTask(browser, task);
+
+      // 성공 → dead error 카운터 리셋
+      consecutiveDeadErrors = 0;
 
       // 결과 분류 및 상태 업데이트
       const collectedCount = result.data?.list?.length || 0;
@@ -172,9 +208,9 @@ async function browserWorker(
         incrementSkipped(1);
       }
 
-      // CAPTCHA 감지 시 재시작
-      if (result.captchaDetected) {
-        await handleBrowserRestart(browser, workerIndex, 'CAPTCHA 감지');
+      // CAPTCHA 감지 시 프로필 재생성 (새 fingerprint + 새 proxy)
+      if (result.captchaDetected && !shouldStop()) {
+        await handleBrowserRecreation(holder, workerIndex, 'CAPTCHA 감지');
       }
 
     } catch (error: any) {
@@ -183,6 +219,23 @@ async function browserWorker(
       taskQueue.markFailed(task, errorMsg);
       browser.completeCrawling('error', errorMsg);
       incrementSkipped(1);
+
+      // 중지 요청 시 재시작 안 함
+      if (shouldStop()) break;
+
+      // 브라우저 죽음 감지
+      const isDeadBrowser = DEAD_BROWSER_PATTERNS.some(p => errorMsg.includes(p));
+
+      if (isDeadBrowser) {
+        consecutiveDeadErrors++;
+        console.log(`[Worker ${workerIndex}] ${profileName} - dead browser 감지 (${consecutiveDeadErrors}/${MAX_DEAD_ERRORS})`);
+
+        if (consecutiveDeadErrors >= MAX_DEAD_ERRORS) {
+          consecutiveDeadErrors = 0;
+          await handleBrowserRestart(holder, workerIndex, '브라우저 프로세스 죽음');
+        }
+        continue;
+      }
 
       // 네트워크 오류인지 확인
       const NETWORK_ERROR_PATTERNS = [
@@ -197,35 +250,47 @@ async function browserWorker(
 
       // 네트워크 오류면 브라우저 재시작
       if (isNetworkError) {
-        await handleBrowserRestart(browser, workerIndex, '네트워크 오류');
+        consecutiveDeadErrors = 0;
+        await handleBrowserRestart(holder, workerIndex, '네트워크 오류');
       }
     }
 
-    // Random Delay (8~15초)
-    const randomDelayMs = Math.floor(Math.random() * 7000) + 8000;
+    if (shouldStop()) break;
 
-    browser.updateStatus('waiting', `대기 중...`);
-    await delay(randomDelayMs);
+    // Random Delay (8~15초, 중지 신호에 빠르게 반응)
+    holder.browser.updateStatus('waiting', `대기 중...`);
+    const randomDelaySeconds = Math.floor(Math.random() * 7) + 8;
+    for (let i = 0; i < randomDelaySeconds && !shouldStop(); i++) {
+      await delay(1000);
+    }
   }
 }
 
 /**
- * 브라우저 재시작 처리 (DDD 패턴)
+ * 브라우저 재시작 처리 (프록시만 교체)
  * - 새 프록시로 시작 시도 (그룹별)
  * - 실패하면 다른 프록시로 재시도 (최대 10회)
+ * - 죽은 브라우저, 네트워크 오류, IP 변경 모두 이 함수로 복구
  */
 async function handleBrowserRestart(
-  browser: CrawlerBrowser,
+  holder: BrowserHolder,
   workerIndex: number,
   reason: string
 ): Promise<void> {
   const maxProxyRetries = 10;
   const proxyPool = getProxyPool();
+  const browser = holder.browser;
   const profileName = browser.getProfileName();
   const groupId = browser.getProxyGroupId();
   const groupName = browser.getProxyGroupName();
 
   for (let proxyAttempt = 1; proxyAttempt <= maxProxyRetries; proxyAttempt++) {
+    // 중지 요청 시 즉시 종료
+    if (shouldStop()) {
+      console.log(`[Worker ${workerIndex}] ${profileName} - 중지 요청으로 재시작 취소`);
+      return;
+    }
+
     browser.updateStatus('restarting', `${reason} - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}...`);
 
     try {
@@ -249,7 +314,7 @@ async function handleBrowserRestart(
       console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}: ${newProxy.ip}:${newProxy.port}`);
 
       // 브라우저 재시작 (새 Proxy로)
-      await browser.restart(newProxy, 2);
+      await browser.restart(newProxy);
 
       // Proxy를 in_use로 표시
       proxyPool.markInUse(newProxy.id);
@@ -271,6 +336,61 @@ async function handleBrowserRestart(
 }
 
 /**
+ * CAPTCHA 차단 시 프로필 재생성 (새 fingerprint + 새 proxy = 완전한 새 identity)
+ * 실패 시 폴백: 프록시만 변경하는 일반 재시작
+ */
+async function handleBrowserRecreation(
+  holder: BrowserHolder,
+  workerIndex: number,
+  reason: string
+): Promise<void> {
+  const browserManager = getBrowserManager();
+  const proxyPool = getProxyPool();
+  const oldBrowser = holder.browser;
+  const profileName = oldBrowser.getProfileName();
+  const groupId = oldBrowser.getProxyGroupId();
+  const groupName = oldBrowser.getProxyGroupName();
+
+  console.log(`[Worker ${workerIndex}] ${profileName} - ${reason}: 프로필 재생성 시작`);
+  oldBrowser.updateStatus('restarting', `${reason} - 프로필 재생성 중...`);
+
+  try {
+    // 1. 프로필 재생성 (GoLogin: 구 삭제 + 신 생성)
+    const newBrowser = await browserManager.recreateProfile(oldBrowser);
+
+    // 2. 새 프록시 할당
+    const newProxy = groupId !== undefined
+      ? proxyPool.getNextProxyByGroup(groupId)
+      : proxyPool.getNextProxy();
+
+    if (!newProxy) {
+      console.log(`[Worker ${workerIndex}] ${profileName} - 새 프록시 없음`);
+      newBrowser.updateStatus('error', `No available proxies in group ${groupName || 'default'}`);
+      holder.browser = newBrowser;
+      return;
+    }
+
+    // 3. 프록시 설정 + 브라우저 시작
+    await newBrowser.updateProxySettings(newProxy);
+    proxyPool.markInUse(newProxy.id);
+
+    await newBrowser.start({
+      validateProxy: false,
+      validateConnection: false,
+    });
+
+    // 4. holder 참조 교체 (worker가 새 인스턴스 사용)
+    holder.browser = newBrowser;
+
+    console.log(`[Worker ${workerIndex}] ${profileName} - ✓ 프로필 재생성 완료 (${newBrowser.getProfileId()}) proxy: ${newProxy.ip}:${newProxy.port}`);
+  } catch (error: any) {
+    console.log(`[Worker ${workerIndex}] ${profileName} - ✗ 프로필 재생성 실패: ${error.message}, 프록시만 변경으로 폴백`);
+    // 폴백: 기존 프로필로 프록시만 변경
+    await handleBrowserRestart(holder, workerIndex, `${reason} (재생성 실패, 프록시 변경)`);
+  }
+}
+
+/**
  * =====================================================
  * Task Fetcher (Producer)
  * =====================================================
@@ -283,16 +403,23 @@ async function handleBrowserRestart(
  */
 async function taskFetcher(
   taskQueue: TaskQueueManager,
-  browserManager: ReturnType<typeof getBrowserManager>
+  browserManager: ReturnType<typeof getBrowserManager>,
+  holders: BrowserHolder[]
 ): Promise<void> {
-  const browsers = browserManager.getBrowsers();
+  const browserCount = holders.length;
 
   // 개발 환경(bun run dev)이면 10개로 제한, 프로덕션은 브라우저 개수 × 100
   const limit = process.env.NODE_ENV === 'development'
     ? 10
-    : browsers.length * 100;
+    : browserCount * 100;
+
+  const proxyPool = getProxyPool();
 
   while (!shouldStop()) {
+    // 매 루프 시작 시 모든 프록시 활성화 (dead → active)
+    proxyPool.resetAllProxies();
+    console.log(`[TaskFetcher] All proxies reset to active`);
+
     // 태스크 가져오기
     console.log(`[TaskFetcher] Fetching tasks (limit: ${limit}, env: ${process.env.NODE_ENV || 'production'})...`);
     const tasks = await fetchTasks(limit);
@@ -300,7 +427,10 @@ async function taskFetcher(
     if (tasks.length === 0) {
       console.log(`[TaskFetcher] No tasks available, waiting 5 minutes...`);
       setWaitState(Date.now() + 5 * 60 * 1000, "Task 조회 대기 중...");
-      await delay(5 * 60 * 1000);
+      // 1초 단위로 체크하여 중지 신호에 빠르게 반응
+      for (let i = 0; i < 300 && !shouldStop(); i++) {
+        await delay(1000);
+      }
       clearWaitState();
       continue;
     }
@@ -331,14 +461,9 @@ async function taskFetcher(
     const BREAK_DURATION = 5 * 60 * 1000; // 5분
     setWaitState(breakStartTime + BREAK_DURATION, "IP 변경 및 대기 중...");
 
-    // 모든 프록시를 active 상태로 reset (순환 인덱스는 유지)
-    console.log(`[TaskFetcher] Resetting all proxies to active status...`);
-    const proxyPool = getProxyPool();
-    proxyPool.resetAllProxies();
-
-    // 모든 브라우저 IP 일괄 변경
+    // 모든 브라우저 IP 일괄 변경 (죽은 브라우저도 이 과정에서 복구)
     console.log(`[TaskFetcher] Changing IPs for all browsers...`);
-    await changeAllBrowserIPs(browsers);
+    await changeAllBrowserIPs(holders);
 
     // IP 변경에 걸린 시간을 제외한 나머지 대기
     const ipChangeElapsed = Date.now() - breakStartTime;
@@ -347,7 +472,10 @@ async function taskFetcher(
 
     // progress bar를 남은 대기 시간에 맞게 갱신
     setWaitState(Date.now() + remainingDelay, "다음 작업 대기 중...");
-    await delay(remainingDelay);
+    const remainingSeconds = Math.ceil(remainingDelay / 1000);
+    for (let i = 0; i < remainingSeconds && !shouldStop(); i++) {
+      await delay(1000);
+    }
     clearWaitState();
 
     console.log(`[TaskFetcher] Break finished. Fetching next batch...`);
@@ -355,55 +483,84 @@ async function taskFetcher(
 }
 
 /**
- * 모든 브라우저의 IP를 일괄 변경
+ * 모든 브라우저의 IP를 일괄 변경 (병렬 처리, concurrency=10)
+ * 죽은 브라우저도 이 과정에서 복구됨 (restart가 stop → start 수행)
  */
 async function changeAllBrowserIPs(
-  browsers: CrawlerBrowser[]
+  holders: BrowserHolder[]
 ): Promise<void> {
   const proxyPool = getProxyPool();
+  const BATCH_SIZE = 10;
+  const maxRetries = 5;
 
-  for (let i = 0; i < browsers.length; i++) {
-    const browser = browsers[i];
-    const groupId = browser.getProxyGroupId();
-    const groupName = browser.getProxyGroupName();
-    const profileName = browser.getProfileName();
+  console.log(`[IPChange] Starting IP change for ${holders.length} browsers (batch size: ${BATCH_SIZE}, max retries: ${maxRetries})`);
 
-    console.log(`[IPChange] [${i + 1}/${browsers.length}] Changing IP for ${profileName} [${groupName || 'default'}]...`);
+  for (let batchStart = 0; batchStart < holders.length; batchStart += BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + BATCH_SIZE, holders.length);
+    const batch = holders.slice(batchStart, batchEnd);
 
-    try {
-      // 기존 Proxy를 dead로 표시
-      const oldProxyId = browser.getProxyId();
-      if (oldProxyId) {
-        proxyPool.markDead(oldProxyId);
-      }
-
-      // 그룹별 새 Proxy 할당
-      const newProxy = groupId !== undefined
-        ? proxyPool.getNextProxyByGroup(groupId)
-        : proxyPool.getNextProxy();
-
-      if (!newProxy) {
-        console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - No available proxies`);
-        browser.updateStatus('error', `No available proxies in group ${groupName || 'default'}`);
-        continue;
-      }
-
-      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - New proxy: ${newProxy.ip}:${newProxy.port}`);
-
-      // 브라우저 재시작 (새 Proxy로)
-      await browser.restart(newProxy, 2);
-
-      // Proxy를 in_use로 표시
-      proxyPool.markInUse(newProxy.id);
-
-      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✓ IP change completed`);
-    } catch (error: any) {
-      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✗ IP change failed: ${error.message}`);
-      browser.updateStatus('error', `IP change failed: ${error.message}`);
+    if (batchStart > 0) {
+      console.log(`[IPChange] Waiting 5s before next batch...`);
+      await delay(5000);
     }
+
+    console.log(`[IPChange] Processing batch ${batchStart + 1}-${batchEnd}/${holders.length}`);
+
+    await Promise.all(batch.map(async (holder) => {
+      const browser = holder.browser;
+      const groupId = browser.getProxyGroupId();
+      const groupName = browser.getProxyGroupName();
+      const profileName = browser.getProfileName();
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        if (shouldStop()) return;
+
+        try {
+          // 기존 Proxy를 dead로 표시
+          const oldProxyId = browser.getProxyId();
+          if (oldProxyId) {
+            proxyPool.markDead(oldProxyId);
+          }
+
+          // 그룹별 새 Proxy 할당
+          const newProxy = groupId !== undefined
+            ? proxyPool.getNextProxyByGroup(groupId)
+            : proxyPool.getNextProxy();
+
+          if (!newProxy) {
+            console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - No available proxies`);
+            browser.updateStatus('error', `No available proxies in group ${groupName || 'default'}`);
+            return;
+          }
+
+          console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - 프록시 시도 ${attempt}/${maxRetries}: ${newProxy.ip}:${newProxy.port}`);
+
+          // 브라우저 재시작 (새 Proxy로 — 죽은 브라우저도 stop → start로 복구)
+          await browser.restart(newProxy);
+
+          // Proxy를 in_use로 표시
+          proxyPool.markInUse(newProxy.id);
+
+          console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✓ IP change completed: ${newProxy.ip}:${newProxy.port}`);
+          return; // 성공 시 루프 종료
+
+        } catch (error: any) {
+          console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✗ 시도 ${attempt}/${maxRetries} 실패: ${error.message}`);
+
+          if (attempt < maxRetries) {
+            await delay(1500);
+          }
+        }
+      }
+
+      // 모든 재시도 실패
+      console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ${maxRetries}회 모두 실패`);
+      browser.updateStatus('error', `IP change failed after ${maxRetries} retries`);
+    }));
   }
 
-  console.log(`[IPChange] All browsers IP change completed`);
+  const successCount = holders.filter(h => h.browser.getStatus().status !== 'error').length;
+  console.log(`[IPChange] IP change completed: ${successCount}/${holders.length} browsers ready`);
 }
 
 /**
@@ -466,6 +623,9 @@ export async function startCrawling(): Promise<CrawlResult[]> {
 
   console.log(`\n[Crawler] Starting with ${batchSize} prepared browsers (DDD Pattern)\n`);
 
+  // BrowserHolder 배열 생성 (mutable wrapper — 프로필 재생성 시 참조 교체 가능)
+  const holders: BrowserHolder[] = browsers.map(browser => ({ browser }));
+
   // ========================================
   // Step 1: Task Queue Manager 생성
   // ========================================
@@ -474,7 +634,9 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   // ========================================
   // Step 2: 상태 조회 함수 등록 (UI용)
   // ========================================
-  registerBrowserStatusesGetter(() => browserManager.getStatuses());
+  registerBrowserStatusesGetter(() =>
+    holders.map(h => h.browser.getStatus())
+  );
   registerTaskQueueStatsGetter(() => ({
     completedCount: taskQueue.completedCount(),
     failedCount: taskQueue.failedCount(),
@@ -486,14 +648,14 @@ export async function startCrawling(): Promise<CrawlResult[]> {
     // ========================================
 
     // Task Fetcher (Producer) 시작
-    const fetcherPromise = taskFetcher(taskQueue, browserManager);
+    const fetcherPromise = taskFetcher(taskQueue, browserManager, holders);
 
     // Result Handler 시작
     const handlerPromise = resultHandler(taskQueue);
 
     // Browser Workers (Consumers) 시작
-    const workerPromises = browsers.map((browser, index) =>
-      browserWorker(browser, index, taskQueue)
+    const workerPromises = holders.map((holder, index) =>
+      browserWorker(holder, index, taskQueue)
     );
 
     // Keepalive 주기적으로 실행
@@ -606,7 +768,7 @@ async function preparePage(
   if (task.URLPLATFORMS === "NAVER" && !currentUrl.includes("naver.com")) {
     await page.goto("https://www.naver.com/", {
       waitUntil: "domcontentloaded",
-      timeout: 60000,
+      timeout: 30000,
     });
 
     const afterGotoUrl = page.url();
@@ -617,12 +779,15 @@ async function preparePage(
       throw new Error(`naver.com 이동 실패: ${afterGotoUrl}`);
     }
 
+    // DOM 파싱 완료 후 나머지 리소스 로딩 중단
+    await page.evaluate(() => window.stop());
+
     const randomDelay = Math.floor(Math.random() * 6000) + 2000;
     await delay(randomDelay);
   } else if (task.URLPLATFORMS === "AUCTION" && !currentUrl.includes("auction.co.kr")) {
     await page.goto("https://www.auction.co.kr/", {
       waitUntil: "domcontentloaded",
-      timeout: 60000,
+      timeout: 30000,
     });
 
     const afterGotoUrl = page.url();
@@ -632,6 +797,9 @@ async function preparePage(
     if (!afterGotoUrl.includes("auction.co.kr")) {
       throw new Error(`auction.co.kr 이동 실패: ${afterGotoUrl}`);
     }
+
+    // DOM 파싱 완료 후 나머지 리소스 로딩 중단 (base URL 이동 목적만 달성)
+    await page.evaluate(() => window.stop());
 
     const randomDelay = Math.floor(Math.random() * 6000) + 2000;
     await delay(randomDelay);
@@ -692,11 +860,12 @@ async function navigateToTarget(
     throw new Error("Failed to create navigation link");
   }
 
-  // 클릭 전 랜덤 대기 (0~5초)
-  const preClickDelay = Math.floor(Math.random() * 5000);
+  // 클릭 전 랜덤 대기 (0~3초)
+  const preClickDelay = Math.floor(Math.random() * 3000);
   await delay(preClickDelay);
 
   // 클릭 및 네비게이션 대기
+  const navStart = Date.now();
   const navigationPromise = page.waitForNavigation({
     waitUntil: "domcontentloaded",
     timeout: 60000,
@@ -707,6 +876,7 @@ async function navigateToTarget(
   });
 
   await navigationPromise;
+  console.log(`[Navigate] ${profileName} - domcontentloaded: ${Date.now() - navStart}ms`);
 
   // URL 검증
   const finalUrl = page.url();
@@ -726,10 +896,40 @@ async function navigateToTarget(
     throw new Error(`Wrong AUCTION URL pattern! Got: ${finalUrl}`);
   }
 
-  // DOM 완전 로드 대기
-  await page.waitForFunction(() => document.readyState === "complete", {
-    timeout: 60000,
-  });
+  // 플랫폼별 데이터 존재 확인 후 나머지 로딩 중단
+  // (readyState === "complete" 대기 대신, 필요한 데이터만 확인하고 빠르게 진행)
+  // Cloudflare 블록 페이지에는 데이터 요소가 없으므로 블록 지표도 함께 감시
+  const dataWaitStart = Date.now();
+  if (task.URLPLATFORMS === "AUCTION") {
+    // Auction: #__NEXT_DATA__ OR Cloudflare 블록 지표 (스크립트 변수 + 텍스트)
+    const waitResult = await page.waitForFunction(
+      () => {
+        const hasData = !!document.getElementById("__NEXT_DATA__");
+        const hasBlock = !!(window as any)._cf_chl_opt ||
+          (document.title === "잠시만요..." || document.title === "Just a moment...") ||
+          (document.body?.textContent || "").includes("사용자 활동 검토 요청");
+        if (hasData) return "data";
+        if (hasBlock) return "blocked";
+        return false;
+      },
+      { timeout: 30000 }
+    );
+    const result = await waitResult.jsonValue();
+    console.log(`[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`);
+    if (result === "blocked") {
+      throw new Error("Cloudflare block detected - IP change needed");
+    }
+  } else if (task.URLPLATFORMS === "NAVER") {
+    // Naver: window.__PRELOADED_STATE__ 존재 확인
+    await page.waitForFunction(
+      () => !!(window as any).__PRELOADED_STATE__,
+      { timeout: 30000 }
+    );
+    console.log(`[Navigate] ${profileName} - data wait: ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`);
+  }
+
+  // 나머지 리소스 로딩 중단 (이미지, 광고, 트래킹 등)
+  await page.evaluate(() => window.stop());
 }
 
 /**
