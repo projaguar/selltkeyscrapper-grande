@@ -767,8 +767,8 @@ async function preparePage(
   // Base URL로 이동 (필요시)
   if (task.URLPLATFORMS === "NAVER" && !currentUrl.includes("naver.com")) {
     await page.goto("https://www.naver.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
+      waitUntil: "load",
+      timeout: 60000,
     });
 
     const afterGotoUrl = page.url();
@@ -778,9 +778,6 @@ async function preparePage(
     if (!afterGotoUrl.includes("naver.com")) {
       throw new Error(`naver.com 이동 실패: ${afterGotoUrl}`);
     }
-
-    // DOM 파싱 완료 후 나머지 리소스 로딩 중단
-    await page.evaluate(() => window.stop());
 
     const randomDelay = Math.floor(Math.random() * 6000) + 2000;
     await delay(randomDelay);
@@ -866,8 +863,9 @@ async function navigateToTarget(
 
   // 클릭 및 네비게이션 대기
   const navStart = Date.now();
+  const waitCondition = task.URLPLATFORMS === "NAVER" ? "load" : "domcontentloaded";
   const navigationPromise = page.waitForNavigation({
-    waitUntil: "domcontentloaded",
+    waitUntil: waitCondition,
     timeout: 60000,
   });
 
@@ -876,7 +874,7 @@ async function navigateToTarget(
   });
 
   await navigationPromise;
-  console.log(`[Navigate] ${profileName} - domcontentloaded: ${Date.now() - navStart}ms`);
+  console.log(`[Navigate] ${profileName} - ${waitCondition}: ${Date.now() - navStart}ms`);
 
   // URL 검증
   const finalUrl = page.url();
@@ -928,8 +926,10 @@ async function navigateToTarget(
     console.log(`[Navigate] ${profileName} - data wait: ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`);
   }
 
-  // 나머지 리소스 로딩 중단 (이미지, 광고, 트래킹 등)
-  await page.evaluate(() => window.stop());
+  // 나머지 리소스 로딩 중단 (이미지, 광고, 트래킹 등) - 네이버는 제외 (블록 방지)
+  if (task.URLPLATFORMS !== "NAVER") {
+    await page.evaluate(() => window.stop());
+  }
 }
 
 /**
