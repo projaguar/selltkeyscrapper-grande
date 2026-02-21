@@ -109,10 +109,9 @@ class BrowserManager {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, groupAssignments.length);
       const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, k) => batchStart + k);
 
-      // 첫 배치가 아니면 5초 대기 (AdsPower API 부하 방지)
+      // 첫 배치가 아니면 짧은 대기 (API rate limit은 큐가 관리)
       if (batchStart > 0) {
-        console.log(`[BrowserManager] Waiting 5s before next batch...`);
-        await this.delay(5000);
+        await this.delay(500);
       }
 
       console.log(`[BrowserManager] Processing batch ${batchStart + 1}-${batchEnd}/${groupAssignments.length}`);
