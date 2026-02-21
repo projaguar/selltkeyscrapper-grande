@@ -989,20 +989,20 @@ async function navigateToTarget(
   const preClickDelay = Math.floor(Math.random() * 3000);
   await delay(preClickDelay);
 
-  // 클릭 및 네비게이션 대기
+  // 클릭 및 네비게이션 대기 (Promise.all로 동시 await — unhandled rejection 방지)
   const navStart = Date.now();
   const waitCondition =
     task.URLPLATFORMS === "NAVER" ? "load" : "domcontentloaded";
-  const navigationPromise = page.waitForNavigation({
-    waitUntil: waitCondition,
-    timeout: 60000,
-  });
 
-  await page.click(`#${uniqueId}`, {
-    delay: Math.floor(Math.random() * 50) + 30,
-  });
-
-  await navigationPromise;
+  await Promise.all([
+    page.waitForNavigation({
+      waitUntil: waitCondition,
+      timeout: 60000,
+    }),
+    page.click(`#${uniqueId}`, {
+      delay: Math.floor(Math.random() * 50) + 30,
+    }),
+  ]);
   console.log(
     `[Navigate] ${profileName} - ${waitCondition}: ${Date.now() - navStart}ms`,
   );
