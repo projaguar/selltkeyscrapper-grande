@@ -208,11 +208,8 @@ class BrowserManager {
 
         console.log(`[BrowserManager] ${profileName} [${groupName}] - 프록시 시도 ${attempt}/${maxRetries}: ${proxy.ip}:${proxy.port}`);
 
-        // 프록시 설정 업데이트
+        // 프록시 설정 업데이트 (getNextProxyByGroup에서 이미 in_use로 마킹됨)
         await browser.updateProxySettings(proxy);
-
-        // 프록시 in_use로 표시
-        proxyPool.markInUse(proxy.id);
 
         // 탭 설정 초기화
         await browser.clearTabSettings();
@@ -309,8 +306,16 @@ class BrowserManager {
   async clear(): Promise<void> {
     console.log(`[BrowserManager] Clearing ${this.browsers.size} browsers...`);
 
+    const proxyPool = getProxyPool();
+
     for (const browser of this.browsers.values()) {
       try {
+        // 프록시 release (in_use → active)
+        const proxyId = browser.getProxyId();
+        const groupId = browser.getProxyGroupId();
+        if (proxyId) {
+          proxyPool.releaseProxy(proxyId, groupId);
+        }
         await browser.stop();
       } catch {
         // 무시

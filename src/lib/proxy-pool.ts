@@ -102,6 +102,7 @@ export class ProxyPool {
   /**
    * 다음 사용 가능한 proxy 반환 (Round-robin 방식)
    * DB에서 최신 상태를 확인하여 실제로 'active' 상태인 proxy만 선택
+   * 선택 즉시 in_use로 마킹 (race condition 방지)
    */
   getNextProxy(): Proxy | null {
     if (this.proxies.length === 0) {
@@ -125,6 +126,8 @@ export class ProxyPool {
 
       // 실제로 'active' 상태인 경우에만 반환
       if (currentProxy && currentProxy.status === 'active') {
+        // 선택 즉시 in_use로 마킹 (동기 — race condition 방지)
+        this.markInUse(currentProxy.id);
         console.log(`[ProxyPool] Assigned proxy ${currentProxy.ip}:${currentProxy.port} (attempt ${attempts}/${maxAttempts})`);
         return currentProxy;
       }
@@ -172,9 +175,42 @@ export class ProxyPool {
       });
       console.log(`[ProxyPool] Proxy ${proxyId} marked as dead`);
 
-      // 목록에서 제거
+      // 글로벌 목록에서 제거
       this.proxies = this.proxies.filter(p => p.id !== proxyId);
+
+      // 그룹별 캐시에서도 제거 (stale cache 방지)
+      for (const [groupId, groupList] of this.groupProxies.entries()) {
+        const filtered = groupList.filter(p => p.id !== proxyId);
+        if (filtered.length !== groupList.length) {
+          this.groupProxies.set(groupId, filtered);
+          // 인덱스가 범위를 벗어나면 리셋
+          const idx = this.groupCurrentIndex.get(groupId) || 0;
+          if (filtered.length > 0 && idx >= filtered.length) {
+            this.groupCurrentIndex.set(groupId, 0);
+          }
+        }
+      }
+
       console.log(`[ProxyPool] Remaining active proxies: ${this.proxies.length}`);
+    } else {
+      // proxies 캐시에 없어도 DB는 업데이트 (in_use 상태에서 직접 dead 처리하는 경우)
+      db.updateProxy(proxyId, {
+        status: 'dead',
+        last_checked: new Date().toISOString()
+      });
+      console.log(`[ProxyPool] Proxy ${proxyId} marked as dead (not in cache)`);
+
+      // 그룹별 캐시에서도 제거
+      for (const [groupId, groupList] of this.groupProxies.entries()) {
+        const filtered = groupList.filter(p => p.id !== proxyId);
+        if (filtered.length !== groupList.length) {
+          this.groupProxies.set(groupId, filtered);
+          const idx = this.groupCurrentIndex.get(groupId) || 0;
+          if (filtered.length > 0 && idx >= filtered.length) {
+            this.groupCurrentIndex.set(groupId, 0);
+          }
+        }
+      }
     }
   }
 
@@ -241,6 +277,7 @@ export class ProxyPool {
 
   /**
    * 특정 그룹에서 다음 사용 가능한 proxy 반환 (Round-robin 방식)
+   * 선택 즉시 in_use로 마킹 (race condition 방지)
    */
   getNextProxyByGroup(groupId: number): Proxy | null {
     // 해당 그룹의 프록시가 로드되지 않았으면 로드
@@ -270,6 +307,8 @@ export class ProxyPool {
 
       // 실제로 'active' 상태인 경우에만 반환
       if (currentProxy && currentProxy.status === 'active') {
+        // 선택 즉시 in_use로 마킹 (동기 — race condition 방지)
+        this.markInUse(currentProxy.id);
         console.log(`[ProxyPool] Assigned proxy ${currentProxy.ip}:${currentProxy.port} from group ${groupId} (attempt ${attempts}/${maxAttempts})`);
         return currentProxy;
       }
@@ -310,7 +349,7 @@ export class ProxyPool {
   /**
    * 모든 프록시를 active 상태로 reset (순환 인덱스는 유지)
    * - dead, in_use 상태의 모든 프록시를 active로 변경
-   * - 5분 휴식 후 새로운 task 시작 시 호출
+   * - prepareBrowsers 시작 시 호출 (아직 브라우저가 없는 상태)
    * - currentIndex는 유지 (최대한 사용했던 IP는 나중에 사용)
    */
   resetAllProxies(): void {
@@ -338,6 +377,36 @@ export class ProxyPool {
     }
 
     console.log(`[ProxyPool] All proxies reset complete. Current index: ${this.currentIndex}, Available proxies: ${this.proxies.length}`);
+  }
+
+  /**
+   * dead 프록시만 active로 복원 (in_use는 유지)
+   * - 크롤링 중 태스크 루프에서 호출
+   * - 현재 사용 중인 프록시(in_use)는 건드리지 않음
+   */
+  resetDeadProxies(): void {
+    const allProxies = db.getProxies() as Proxy[];
+    let resetCount = 0;
+
+    for (const proxy of allProxies) {
+      if (proxy.status === 'dead') {
+        db.updateProxy(proxy.id, { status: 'active' });
+        resetCount++;
+      }
+    }
+
+    if (resetCount > 0) {
+      console.log(`[ProxyPool] Reset ${resetCount} dead proxies to active`);
+
+      // 프록시 목록 다시 로드 (currentIndex는 유지)
+      this.reload();
+
+      // 그룹별 캐시도 새로고침
+      const groupIds = Array.from(this.groupProxies.keys());
+      for (const groupId of groupIds) {
+        this.reloadGroup(groupId);
+      }
+    }
   }
 }
 

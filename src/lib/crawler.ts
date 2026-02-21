@@ -313,11 +313,8 @@ async function handleBrowserRestart(
 
       console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}: ${newProxy.ip}:${newProxy.port}`);
 
-      // 브라우저 재시작 (새 Proxy로)
+      // 브라우저 재시작 (새 Proxy로, getNextProxy에서 이미 in_use로 마킹됨)
       await browser.restart(newProxy);
-
-      // Proxy를 in_use로 표시
-      proxyPool.markInUse(newProxy.id);
 
       console.log(`[Worker ${workerIndex}] ${profileName} [${groupName || 'default'}] - ✓ 재시작 완료: ${newProxy.ip}:${newProxy.port}`);
       return;
@@ -370,9 +367,8 @@ async function handleBrowserRecreation(
       return;
     }
 
-    // 3. 프록시 설정 + 브라우저 시작
+    // 3. 프록시 설정 + 브라우저 시작 (getNextProxy에서 이미 in_use로 마킹됨)
     await newBrowser.updateProxySettings(newProxy);
-    proxyPool.markInUse(newProxy.id);
 
     await newBrowser.start({
       validateProxy: false,
@@ -416,9 +412,8 @@ async function taskFetcher(
   const proxyPool = getProxyPool();
 
   while (!shouldStop()) {
-    // 매 루프 시작 시 모든 프록시 활성화 (dead → active)
-    proxyPool.resetAllProxies();
-    console.log(`[TaskFetcher] All proxies reset to active`);
+    // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
+    proxyPool.resetDeadProxies();
 
     // 태스크 가져오기
     console.log(`[TaskFetcher] Fetching tasks (limit: ${limit}, env: ${process.env.NODE_ENV || 'production'})...`);
@@ -535,11 +530,8 @@ async function changeAllBrowserIPs(
 
           console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - 프록시 시도 ${attempt}/${maxRetries}: ${newProxy.ip}:${newProxy.port}`);
 
-          // 브라우저 재시작 (새 Proxy로 — 죽은 브라우저도 stop → start로 복구)
+          // 브라우저 재시작 (새 Proxy로 — 죽은 브라우저도 stop → start로 복구, getNextProxy에서 이미 in_use로 마킹됨)
           await browser.restart(newProxy);
-
-          // Proxy를 in_use로 표시
-          proxyPool.markInUse(newProxy.id);
 
           console.log(`[IPChange] ${profileName} [${groupName || 'default'}] - ✓ IP change completed: ${newProxy.ip}:${newProxy.port}`);
           return; // 성공 시 루프 종료

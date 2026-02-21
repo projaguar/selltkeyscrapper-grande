@@ -81,9 +81,7 @@ export class SessionManager {
 
     this.sessions.set(profileId, session);
 
-    // Proxy를 사용 중 상태로 표시
-    proxyPool.markInUse(proxy.id);
-
+    // getNextProxy()에서 이미 in_use로 마킹됨
     console.log(`✅ [SessionManager] Session created for ${profileName} with proxy ${proxy.ip}:${proxy.port}`);
 
     return session;
