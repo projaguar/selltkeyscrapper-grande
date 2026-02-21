@@ -8,7 +8,7 @@ function Settings() {
 
   useEffect(() => {
     if (window.electronAPI) {
-      window.electronAPI.settings.get('gologinApiKey').then((key) => {
+      window.electronAPI.settings.get('adspowerApiKey').then((key) => {
         if (key) {
           setLocalApiKey(key);
           setApiKey(key);
@@ -19,7 +19,7 @@ function Settings() {
 
   const handleSave = async () => {
     if (window.electronAPI) {
-      await window.electronAPI.settings.set('gologinApiKey', localApiKey);
+      await window.electronAPI.settings.set('adspowerApiKey', localApiKey);
       setApiKey(localApiKey);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -33,10 +33,9 @@ function Settings() {
     }
 
     try {
-      const result = await window.electronAPI.gologin.listProfiles(localApiKey);
-      const profiles = Array.isArray(result)
-        ? result
-        : result.profiles || result.data || [];
+      const result = await window.electronAPI.adspower.listProfiles(localApiKey);
+      // AdsPower returns { code: 0, data: { list: [...] } }
+      const profiles = result.data?.list || [];
       alert(`연결 성공!\n프로필 수: ${profiles.length}개`);
     } catch (error: any) {
       alert(`연결 실패\n${error.message}`);
@@ -48,7 +47,7 @@ function Settings() {
       <h2 className="text-3xl font-bold mb-6">설정</h2>
 
       <div className="bg-white rounded-lg shadow-md p-6 max-w-2xl">
-        <h3 className="text-xl font-semibold mb-4">GoLogin API 설정</h3>
+        <h3 className="text-xl font-semibold mb-4">AdsPower API 설정</h3>
 
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-2">API Key</label>
@@ -56,11 +55,11 @@ function Settings() {
             type="password"
             value={localApiKey}
             onChange={(e) => setLocalApiKey(e.target.value)}
-            placeholder="GoLogin API Key 입력"
+            placeholder="AdsPower API Key 입력"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <p className="text-sm text-gray-500 mt-2">
-            GoLogin Settings &gt; API에서 Dev Token을 생성하세요.
+            AdsPower 설정 &gt; API에서 Key를 확인하세요.
           </p>
         </div>
 
@@ -88,9 +87,9 @@ function Settings() {
         <div className="mt-8 p-4 bg-gray-50 rounded-lg">
           <h4 className="font-semibold mb-2">참고 사항</h4>
           <ul className="text-sm text-gray-600 space-y-1">
-            <li>- GoLogin 앱이 로컬에서 실행 중이어야 브라우저를 사용할 수 있습니다.</li>
-            <li>- API 문서: https://gologin.com/docs/api-reference</li>
-            <li>- .env 파일에 GOLOGIN_API_KEY를 설정하면 자동으로 로드됩니다.</li>
+            <li>- AdsPower 앱이 로컬에서 실행 중이어야 브라우저를 사용할 수 있습니다.</li>
+            <li>- API 엔드포인트: http://local.adspower.net:50325</li>
+            <li>- .env 파일에 ADSPOWER_API_KEY를 설정하면 자동으로 로드됩니다.</li>
           </ul>
         </div>
       </div>

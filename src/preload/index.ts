@@ -5,13 +5,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 앱 경로 가져오기
   getAppPath: () => ipcRenderer.invoke('get-app-path'),
 
-  // GoLogin API 호출
-  gologin: {
-    listProfiles: (apiKey: string) => ipcRenderer.invoke('gologin-list-profiles', apiKey),
-    createProfile: (apiKey: string, name: string) => ipcRenderer.invoke('gologin-create-profile', apiKey, name),
-    getProfile: (apiKey: string, profileId: string) => ipcRenderer.invoke('gologin-get-profile', apiKey, profileId),
-    updateProfile: (apiKey: string, profileId: string, data: any) => ipcRenderer.invoke('gologin-update-profile', apiKey, profileId, data),
-    deleteProfiles: (apiKey: string, profileIds: string[]) => ipcRenderer.invoke('gologin-delete-profiles', apiKey, profileIds),
+  // AdsPower API 호출
+  adspower: {
+    listProfiles: (apiKey: string) => ipcRenderer.invoke('adspower-list-profiles', apiKey),
+    createProfile: (apiKey: string, profileData: any) => ipcRenderer.invoke('adspower-create-profile', apiKey, profileData),
+    getProfile: (apiKey: string, profileId: string) => ipcRenderer.invoke('adspower-get-profile', apiKey, profileId),
+    updateProfile: (apiKey: string, profileId: string, data: any) => ipcRenderer.invoke('adspower-update-profile', apiKey, profileId, data),
+    deleteProfiles: (apiKey: string, profileIds: string[]) => ipcRenderer.invoke('adspower-delete-profiles', apiKey, profileIds),
+    listAppCategories: (apiKey: string) => ipcRenderer.invoke('adspower-list-app-categories', apiKey),
   },
 
   // SQLite 데이터베이스

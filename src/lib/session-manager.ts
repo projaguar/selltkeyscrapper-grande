@@ -1,5 +1,5 @@
 import { getProxyPool } from './proxy-pool';
-import * as gologin from '../services/gologin';
+import * as adspower from '../services/adspower';
 import * as db from '../database/sqlite';
 
 interface Session {
@@ -15,7 +15,7 @@ interface Session {
 }
 
 /**
- * SessionManager - Profile과 Proxy 매핑 관리
+ * SessionManager - Profile과 Proxy 매핑 관리 (AdsPower)
  *
  * 기능:
  * - Profile 조회 및 Proxy 순환 할당
@@ -35,12 +35,9 @@ export class SessionManager {
    * 모든 Profile 조회
    */
   async loadProfiles() {
-    const result = await gologin.listProfiles(this.apiKey);
-    // GoLogin returns array directly or { profiles: [...] }
-    if (Array.isArray(result)) {
-      return result;
-    }
-    return result.profiles || result.data?.list || [];
+    const result = await adspower.listProfiles(this.apiKey);
+    // AdsPower returns { code: 0, data: { list: [...] } }
+    return result.data?.list || [];
   }
 
   /**
@@ -56,16 +53,19 @@ export class SessionManager {
 
     console.log(`[SessionManager] Assigning proxy ${proxy.ip}:${proxy.port} to profile ${profileName}`);
 
-    // GoLogin Profile에 Proxy 설정 업데이트
-    const proxyData = {
-      mode: 'http',
-      host: proxy.ip,
-      port: parseInt(proxy.port, 10),
-      username: proxy.username || '',
-      password: proxy.password || '',
+    // AdsPower Profile에 Proxy 설정 업데이트
+    const updateData = {
+      user_proxy_config: {
+        proxy_type: 'http',
+        proxy_host: proxy.ip,
+        proxy_port: proxy.port,
+        proxy_user: proxy.username || '',
+        proxy_password: proxy.password || '',
+        proxy_soft: 'other',
+      },
     };
 
-    await gologin.changeProfileProxy(this.apiKey, profileId, proxyData);
+    await adspower.updateProfile(this.apiKey, profileId, updateData);
 
     // 세션 생성
     const session: Session = {
@@ -128,7 +128,7 @@ export class SessionManager {
         results.push({ success: false, profileId: profile.user_id, error: error.message });
       }
 
-      // GoLogin has 300 RPM - no delay needed between assignments
+      // AdsPower has 120 RPM - rate limited by adsPowerQueue
     }
 
     return results;

@@ -8,8 +8,18 @@
  * - 상태 관리
  */
 
-import * as gologin from "../../services/gologin";
+import * as adspower from "../../services/adspower";
+import { adsPowerQueue } from "./adspower-queue";
 import type { Proxy } from "../proxy-pool";
+
+// puppeteer-core는 dynamic import로 사용 (Electron main process)
+let puppeteer: any = null;
+async function getPuppeteer() {
+  if (!puppeteer) {
+    puppeteer = await import("puppeteer-core");
+  }
+  return puppeteer;
+}
 
 // ========================================
 // Types
@@ -74,7 +84,6 @@ export class CrawlerBrowser {
 
   // Browser 인스턴스
   private browser?: any; // puppeteer.Browser
-  private glInstance?: any; // GologinApi instance (for exit)
 
   // 상태 정보
   private status: BrowserStatus = "idle";
@@ -119,7 +128,7 @@ export class CrawlerBrowser {
   // ========================================
 
   /**
-   * Proxy 할당 (메모리만 업데이트, GoLogin 업데이트는 updateProxySettings 호출 필요)
+   * Proxy 할당 (메모리만 업데이트, AdsPower 업데이트는 updateProxySettings 호출 필요)
    */
   private assignProxy(proxy: Proxy): void {
     this.proxyId = proxy.id;
@@ -130,38 +139,43 @@ export class CrawlerBrowser {
   }
 
   /**
-   * GoLogin 프로필에 Proxy 설정 업데이트
+   * AdsPower 프로필에 Proxy 설정 + 탭 설정(open_urls) 업데이트
    */
   async updateProxySettings(proxy: Proxy): Promise<void> {
-    const proxyData = {
-      mode: 'http',
-      host: proxy.ip,
-      port: parseInt(proxy.port, 10),
-      username: proxy.username || '',
-      password: proxy.password || '',
+    const updateData: any = {
+      user_proxy_config: {
+        proxy_type: 'http',
+        proxy_host: proxy.ip,
+        proxy_port: proxy.port,
+        proxy_user: proxy.username || '',
+        proxy_password: proxy.password || '',
+        proxy_soft: 'other',
+      },
+      open_urls: ['https://www.naver.com'],
     };
 
-    await gologin.changeProfileProxy(this.apiKey, this.profileId, proxyData);
+    // 큐를 통해 rate limit 준수
+    await adsPowerQueue.enqueue(
+      `updateProfile ${this.profileId}`,
+      () => adspower.updateProfile(this.apiKey, this.profileId, updateData),
+    );
 
     // 성공 시 메모리 업데이트
     this.assignProxy(proxy);
   }
 
   /**
-   * 프로필 핑거프린트 설정 강화 (webRTC, canvas, webGL 등)
+   * 핑거프린트 설정 강화 (AdsPower는 내부 자동 처리이므로 no-op)
    */
   async hardenFingerprint(): Promise<void> {
-    const { updated, changes } = await gologin.hardenProfile(this.apiKey, this.profileId);
-    if (updated) {
-      console.log(`[CrawlerBrowser] ${this.profileName} - 핑거프린트 강화: ${changes.join(', ')}`);
-    }
+    // AdsPower handles fingerprint internally - no action needed
   }
 
   /**
-   * GoLogin은 항상 클린 브라우저를 실행하므로 탭 설정 초기화 불필요 (no-op)
+   * 탭 설정 초기화 (updateProxySettings에서 open_urls 설정하므로 no-op)
    */
   async clearTabSettings(): Promise<void> {
-    // GoLogin launches clean - no action needed
+    // Tab settings are managed via updateProxySettings open_urls
   }
 
   // ========================================
@@ -169,7 +183,7 @@ export class CrawlerBrowser {
   // ========================================
 
   /**
-   * 브라우저 시작 (GoLogin SDK)
+   * 브라우저 시작 (AdsPower API → puppeteer.connect)
    */
   async start(options?: {
     validateConnection?: boolean;
@@ -181,22 +195,31 @@ export class CrawlerBrowser {
     this.updateStatus("starting", "브라우저 시작 중...");
 
     try {
-      // 1. GoLogin SDK로 브라우저 실행 (SDK가 puppeteer Browser를 직접 반환)
-      const { browser, glInstance } = await gologin.launchBrowser(
-        this.apiKey,
-        this.profileId,
-      );
+      // 1. AdsPower API로 브라우저 시작 (큐를 통해 rate limit 준수)
+      const result = await adsPowerQueue.startBrowser(this.apiKey, this.profileId);
 
-      this.browser = browser;
-      this.glInstance = glInstance;
+      // AdsPower returns { code: 0, data: { ws: { puppeteer: "ws://..." }, ... } }
+      const wsEndpoint = result.data?.ws?.puppeteer;
+      if (!wsEndpoint) {
+        throw new Error('AdsPower did not return WebSocket endpoint');
+      }
 
-      // 2. 브라우저 초기화 대기
+      console.log(`[CrawlerBrowser] ${this.profileName} - Connecting to ${wsEndpoint}`);
+
+      // 2. puppeteer.connect()로 브라우저에 연결
+      const pptr = await getPuppeteer();
+      this.browser = await pptr.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: null,
+      });
+
+      // 3. 브라우저 초기화 대기
       await this.delay(2000);
 
-      // 3. 탭 정리 (1개만 유지)
+      // 4. 탭 정리 (1개만 유지)
       await this.cleanupTabs();
 
-      // 4. 리소스 차단 설정 (실시간 제어 가능)
+      // 5. 리소스 차단 설정 (실시간 제어 가능)
       await this.setupResourceBlocking();
 
       // 6. 프록시 검증 (선택적)
@@ -206,17 +229,17 @@ export class CrawlerBrowser {
         let lastError = "";
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          const result = await this.validateProxy();
+          const validationResult = await this.validateProxy();
 
-          if (result.valid) {
-            if (result.actualIp) {
-              this.proxyIp = result.actualIp;
+          if (validationResult.valid) {
+            if (validationResult.actualIp) {
+              this.proxyIp = validationResult.actualIp;
             }
             proxyValidated = true;
             break;
           }
 
-          lastError = result.error || "Unknown error";
+          lastError = validationResult.error || "Unknown error";
 
           if (attempt < maxRetries) {
             await this.delay(2000);
@@ -242,51 +265,25 @@ export class CrawlerBrowser {
   }
 
   /**
-   * 브라우저 중지 (GoLogin SDK exit)
+   * 브라우저 중지 (puppeteer disconnect + AdsPower API stop)
    */
   async stop(): Promise<void> {
-    // 종료 전 안전한 페이지로 이동 (세션 복원 시 크롤링 페이지 대신 naver.com 열리도록)
+    // puppeteer 연결 해제
     if (this.browser) {
       try {
-        const pages = await this.browser.pages();
-        if (pages.length > 0) {
-          await pages[0].evaluate(() => window.stop()).catch(() => {});
-          await pages[0].goto('https://www.naver.com', {
-            waitUntil: 'domcontentloaded',
-            timeout: 10000,
-          });
-          console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 naver.com 이동 완료`);
-        }
-      } catch (e: any) {
-        console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 naver.com 이동 실패: ${e.message}`);
+        this.browser.disconnect();
+      } catch {
+        // 이미 연결이 끊어진 경우 무시
       }
+      this.browser = undefined;
     }
 
-    // GoLogin SDK exit 호출 (내부적으로 browser.close() + stopLocal 수행)
-    if (this.glInstance) {
-      try {
-        await gologin.exitBrowser(this.glInstance);
-      } catch {
-        // 종료 실패 시 puppeteer로 직접 종료 시도
-        if (this.browser) {
-          try {
-            await this.browser.close();
-          } catch {
-            // 무시
-          }
-        }
-      }
-      this.glInstance = undefined;
-    } else if (this.browser) {
-      // glInstance 없으면 puppeteer로 직접 종료
-      try {
-        await this.browser.close();
-      } catch {
-        // 무시
-      }
+    // AdsPower API로 브라우저 종료 (큐를 통해 rate limit 준수)
+    try {
+      await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
+    } catch (e: any) {
+      console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
     }
-
-    this.browser = undefined;
 
     // 리소스 차단 설정 플래그 리셋 (재시작 시 다시 설정할 수 있도록)
     this.requestInterceptionSetup = false;
@@ -558,7 +555,6 @@ export class CrawlerBrowser {
       if (this.status !== 'error' && this.status !== 'restarting' && this.status !== 'stopped') {
         console.log(`[CrawlerBrowser] ${this.profileName} - keepalive 실패, 브라우저 죽음 감지`);
         this.browser = undefined;
-        this.glInstance = undefined;
         this.requestInterceptionSetup = false;
         this.updateStatus('error', 'Browser process died');
       }

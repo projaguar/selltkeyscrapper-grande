@@ -6,7 +6,7 @@ import ProfileManager from '../components/ProfileManager/ProfileManager';
 import Dashboard from '../components/Dashboard/Dashboard';
 
 function App() {
-  const { currentTab, setCurrentTab, setApiKey, setProxies, setGoLoginProfiles } = useStore();
+  const { currentTab, setCurrentTab, setApiKey, setProxies, setAdsPowerProfiles } = useStore();
   const [isInitializing, setIsInitializing] = useState(true);
   const [initStatus, setInitStatus] = useState({ apiKey: false, proxies: false, profiles: false });
 
@@ -16,9 +16,9 @@ function App() {
       setIsInitializing(true);
 
       try {
-        // 1. GoLogin API Key 로드
+        // 1. AdsPower API Key 로드
         if (window.electronAPI) {
-          const savedApiKey = await window.electronAPI.settings.get('gologinApiKey');
+          const savedApiKey = await window.electronAPI.settings.get('adspowerApiKey');
           if (savedApiKey) {
             setApiKey(savedApiKey);
             setInitStatus(prev => ({ ...prev, apiKey: true }));
@@ -28,15 +28,13 @@ function App() {
             setProxies(proxiesData);
             setInitStatus(prev => ({ ...prev, proxies: true }));
 
-            // 3. GoLogin 프로필 로드
+            // 3. AdsPower 프로필 로드
             try {
-              const goLoginResult = await window.electronAPI.gologin.listProfiles(savedApiKey);
-              const goLoginProfiles = Array.isArray(goLoginResult)
-                ? goLoginResult
-                : goLoginResult.profiles || goLoginResult.data || [];
-              setGoLoginProfiles(goLoginProfiles);
+              const result = await window.electronAPI.adspower.listProfiles(savedApiKey);
+              const profiles = result.data?.list || [];
+              setAdsPowerProfiles(profiles);
             } catch (e) {
-              console.error('[App] GoLogin 프로필 로드 실패:', e);
+              console.error('[App] AdsPower 프로필 로드 실패:', e);
             }
             setInitStatus(prev => ({ ...prev, profiles: true }));
           }
@@ -49,7 +47,7 @@ function App() {
     };
 
     initializeApp();
-  }, [setApiKey, setProxies, setGoLoginProfiles]);
+  }, [setApiKey, setProxies, setAdsPowerProfiles]);
 
   const tabs = [
     { id: 'dashboard', label: '대시보드', icon: '📊' },
@@ -63,7 +61,7 @@ function App() {
       {/* 사이드바 */}
       <div className="w-64 bg-gray-900 text-white flex flex-col">
         <div className="p-6">
-          <h1 className="text-2xl font-bold">GoLogin</h1>
+          <h1 className="text-2xl font-bold">AdsPower</h1>
           <p className="text-sm text-gray-400 mt-1">Browser Automation</p>
         </div>
 

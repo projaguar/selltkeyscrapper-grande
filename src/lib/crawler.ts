@@ -414,7 +414,7 @@ async function handleBrowserRecreation(
   oldBrowser.updateStatus("restarting", `${reason} - 프로필 재생성 중...`);
 
   try {
-    // 1. 프로필 재생성 (GoLogin: 구 삭제 + 신 생성)
+    // 1. 프로필 재생성 (AdsPower: 구 삭제 + 신 생성)
     const newBrowser = await browserManager.recreateProfile(oldBrowser);
 
     // 2. 새 프록시 할당

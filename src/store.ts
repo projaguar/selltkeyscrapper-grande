@@ -26,21 +26,23 @@ interface Proxy {
   created_at: string;
 }
 
-export interface GoLoginProfile {
-  id: string;
+export interface AdsPowerProfile {
+  user_id: string;
   name: string;
-  os: string;
-  browserType: string;
-  notes?: string;
-  proxy?: {
-    mode: string;
-    host?: string;
-    port?: number;
-    username?: string;
-    password?: string;
+  serial_number?: string;
+  group_id?: string;
+  group_name?: string;
+  domain_name?: string;
+  user_proxy_config?: {
+    proxy_type: string;
+    proxy_host?: string;
+    proxy_port?: string;
+    proxy_user?: string;
+    proxy_password?: string;
+    proxy_soft?: string;
   };
-  createdAt?: string;
-  updatedAt?: string;
+  created_time?: string;
+  last_open_time?: string;
 }
 
 interface Session {
@@ -82,9 +84,9 @@ interface Store {
   updateProxy: (id: number, updates: Partial<Proxy>) => void;
   deleteProxy: (id: number) => void;
 
-  // GoLogin 프로필 목록
-  goLoginProfiles: GoLoginProfile[];
-  setGoLoginProfiles: (profiles: GoLoginProfile[]) => void;
+  // AdsPower 프로필 목록
+  adsPowerProfiles: AdsPowerProfile[];
+  setAdsPowerProfiles: (profiles: AdsPowerProfile[]) => void;
 
   // 브라우저 세션 상태
   activeSessions: Session[];
@@ -138,9 +140,9 @@ export const useStore = create<Store>((set) => ({
       proxies: state.proxies.filter((p) => p.id !== id),
     })),
 
-  // GoLogin 프로필 목록
-  goLoginProfiles: [],
-  setGoLoginProfiles: (goLoginProfiles) => set({ goLoginProfiles }),
+  // AdsPower 프로필 목록
+  adsPowerProfiles: [],
+  setAdsPowerProfiles: (adsPowerProfiles) => set({ adsPowerProfiles }),
 
   // 브라우저 세션 상태
   activeSessions: [],

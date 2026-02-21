@@ -1,11 +1,12 @@
 export interface ElectronAPI {
   getAppPath: () => Promise<string>;
-  gologin: {
+  adspower: {
     listProfiles: (apiKey: string) => Promise<any>;
-    createProfile: (apiKey: string, name: string) => Promise<any>;
+    createProfile: (apiKey: string, profileData: any) => Promise<any>;
     getProfile: (apiKey: string, profileId: string) => Promise<any>;
     updateProfile: (apiKey: string, profileId: string, data: any) => Promise<any>;
     deleteProfiles: (apiKey: string, profileIds: string[]) => Promise<any>;
+    listAppCategories: (apiKey: string) => Promise<any>;
   };
   db: {
     // Proxy Groups

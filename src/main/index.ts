@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import { join } from 'path';
 import { readFileSync, existsSync } from 'fs';
 import * as db from '../database/sqlite';
-import * as gologin from '../services/gologin';
+import * as adspower from '../services/adspower';
 import * as api from '../services/api';
 import { getProxyPool } from '../lib/proxy-pool';
 import { getSessionManager } from '../lib/session-manager';
@@ -54,14 +54,14 @@ function createWindow() {
 app.whenReady().then(() => {
   // Set app user model id for windows
   if (process.platform === 'win32') {
-    app.setAppUserModelId('com.gologin.scrapper');
+    app.setAppUserModelId('com.adspower.scrapper');
   }
 
   // 데이터베이스 초기화
   const userDataPath = app.getPath('userData');
   db.initDatabase(userDataPath);
 
-  // .env에서 GOLOGIN_API_KEY 로드
+  // .env에서 ADSPOWER_API_KEY 로드
   const envPaths = [
     join(app.getAppPath(), '.env'),
     join(process.cwd(), '.env'),
@@ -69,10 +69,10 @@ app.whenReady().then(() => {
   for (const envPath of envPaths) {
     if (existsSync(envPath)) {
       const content = readFileSync(envPath, 'utf-8');
-      const match = content.match(/^GOLOGIN_API_KEY=(.+)$/m);
+      const match = content.match(/^ADSPOWER_API_KEY=(.+)$/m);
       if (match) {
-        db.setSetting('gologinApiKey', match[1].trim());
-        console.log('[App] GOLOGIN_API_KEY loaded from', envPath);
+        db.setSetting('adspowerApiKey', match[1].trim());
+        console.log('[App] ADSPOWER_API_KEY loaded from', envPath);
         break;
       }
     }
@@ -419,42 +419,50 @@ ipcMain.handle('crawler-get-progress', async () => {
   }
 });
 
-// IPC Handlers - GoLogin API
-ipcMain.handle('gologin-list-profiles', async (_event, apiKey) => {
+// IPC Handlers - AdsPower API
+ipcMain.handle('adspower-list-profiles', async (_event, apiKey) => {
   try {
-    return await gologin.listProfiles(apiKey);
+    return await adspower.listProfiles(apiKey);
   } catch (error: any) {
     return { error: error.message };
   }
 });
 
-ipcMain.handle('gologin-create-profile', async (_event, apiKey, name) => {
+ipcMain.handle('adspower-create-profile', async (_event, apiKey, profileData) => {
   try {
-    return await gologin.createProfile(apiKey, name);
+    return await adspower.createProfile(apiKey, profileData);
   } catch (error: any) {
     return { error: error.message };
   }
 });
 
-ipcMain.handle('gologin-get-profile', async (_event, apiKey, profileId) => {
+ipcMain.handle('adspower-get-profile', async (_event, apiKey, profileId) => {
   try {
-    return await gologin.getProfile(apiKey, profileId);
+    return await adspower.getProfile(apiKey, profileId);
   } catch (error: any) {
     return { error: error.message };
   }
 });
 
-ipcMain.handle('gologin-update-profile', async (_event, apiKey, profileId, data) => {
+ipcMain.handle('adspower-update-profile', async (_event, apiKey, profileId, data) => {
   try {
-    return await gologin.updateProfile(apiKey, profileId, data);
+    return await adspower.updateProfile(apiKey, profileId, data);
   } catch (error: any) {
     return { error: error.message };
   }
 });
 
-ipcMain.handle('gologin-delete-profiles', async (_event, apiKey, profileIds) => {
+ipcMain.handle('adspower-delete-profiles', async (_event, apiKey, profileIds) => {
   try {
-    return await gologin.deleteProfiles(apiKey, profileIds);
+    return await adspower.deleteProfiles(apiKey, profileIds);
+  } catch (error: any) {
+    return { error: error.message };
+  }
+});
+
+ipcMain.handle('adspower-list-app-categories', async (_event, apiKey) => {
+  try {
+    return await adspower.listApplicationCategories(apiKey);
   } catch (error: any) {
     return { error: error.message };
   }

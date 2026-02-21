@@ -48,7 +48,7 @@ interface PreparationResult {
 }
 
 function Dashboard() {
-  const { apiKey, proxies, goLoginProfiles } = useStore();
+  const { apiKey, proxies, adsPowerProfiles } = useStore();
   const [progress, setProgress] = useState<CrawlerProgress | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isCrawling, setIsCrawling] = useState(false);
@@ -108,7 +108,7 @@ function Dashboard() {
 
   // 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
   const handlePrepareBrowsers = async () => {
-    if (goLoginProfiles.length === 0) {
+    if (adsPowerProfiles.length === 0) {
       alert('⚠️ 시작할 프로필이 없습니다.');
       return;
     }
@@ -116,7 +116,7 @@ function Dashboard() {
     setIsPreparing(true);
 
     // 초기 준비 상태 설정 (모든 프로필 대기 중)
-    const initialStatuses: BrowserStatusInfo[] = goLoginProfiles.map((profile) => ({
+    const initialStatuses: BrowserStatusInfo[] = adsPowerProfiles.map((profile) => ({
       profileName: profile.name,
       status: 'waiting' as BrowserStatus,
       message: '대기 중...',
@@ -149,9 +149,9 @@ function Dashboard() {
       });
       removeProgressListenerRef.current = removeListener;
 
-      // 프로필 목록 준비 (GoLogin 'id' → crawler expects 'user_id')
-      const profileList = goLoginProfiles.map(p => ({
-        user_id: p.id,
+      // 프로필 목록 준비 (AdsPower는 user_id 사용)
+      const profileList = adsPowerProfiles.map(p => ({
+        user_id: p.user_id,
         name: p.name,
       }));
 
@@ -165,7 +165,7 @@ function Dashboard() {
 
       if (result.success) {
         const successCount = result.readyCount || 0;
-        const failCount = goLoginProfiles.length - successCount;
+        const failCount = adsPowerProfiles.length - successCount;
         setReadyBrowserCount(successCount);
 
         alert(
@@ -291,7 +291,7 @@ function Dashboard() {
           {/* 브라우저 준비 버튼 */}
           <Button
             onClick={handlePrepareBrowsers}
-            disabled={isPreparing || isCrawling || goLoginProfiles.length === 0}
+            disabled={isPreparing || isCrawling || adsPowerProfiles.length === 0}
             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6"
           >
             {isPreparing ? '⏳ 준비 중...' : '🔗 브라우저 준비'}
@@ -342,7 +342,7 @@ function Dashboard() {
       <div className="grid grid-cols-2 gap-6 mb-8">
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="text-sm text-gray-500 mb-2">전체 프로필</div>
-          <div className="text-3xl font-bold">{goLoginProfiles.length}</div>
+          <div className="text-3xl font-bold">{adsPowerProfiles.length}</div>
         </div>
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="text-sm text-gray-500 mb-2">활성 프록시</div>

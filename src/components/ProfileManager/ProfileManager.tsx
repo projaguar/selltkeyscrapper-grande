@@ -1,9 +1,23 @@
 import { useState, useEffect } from 'react';
 import { useStore } from '../../store';
-import type { GoLoginProfile } from '../../store';
+import type { AdsPowerProfile } from '../../store';
+
+interface AppCategory {
+  id: string;
+  name: string;
+  remark?: string;
+}
+
+// 모바일 카테고리 판별 키워드
+const MOBILE_KEYWORDS = ['android', 'ios', 'iphone', 'ipad', 'mobile', 'phone', 'tablet'];
+
+function isMobileCategory(name: string): boolean {
+  const lower = name.toLowerCase();
+  return MOBILE_KEYWORDS.some((kw) => lower.includes(kw));
+}
 
 function ProfileManager() {
-  const { apiKey, goLoginProfiles, setGoLoginProfiles } = useStore();
+  const { apiKey, adsPowerProfiles, setAdsPowerProfiles } = useStore();
   const [selectedProfiles, setSelectedProfiles] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -13,14 +27,18 @@ function ProfileManager() {
   const [isCreating, setIsCreating] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
 
+  // 어플리케이션 카테고리 (브라우저 타입)
+  const [appCategories, setAppCategories] = useState<AppCategory[]>([]);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
+
   // 편집 모달 상태
-  const [editingProfile, setEditingProfile] = useState<GoLoginProfile | null>(null);
+  const [editingProfile, setEditingProfile] = useState<AdsPowerProfile | null>(null);
   const [editName, setEditName] = useState('');
-  const [editNotes, setEditNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     loadProfiles();
+    loadAppCategories();
   }, []);
 
   const loadProfiles = async () => {
@@ -28,15 +46,31 @@ function ProfileManager() {
 
     setIsLoading(true);
     try {
-      const result = await window.electronAPI.gologin.listProfiles(apiKey);
-      const profiles: GoLoginProfile[] = Array.isArray(result)
-        ? result
-        : result.profiles || result.data || [];
-      setGoLoginProfiles(profiles);
+      const result = await window.electronAPI.adspower.listProfiles(apiKey);
+      const profiles: AdsPowerProfile[] = result.data?.list || [];
+      setAdsPowerProfiles(profiles);
     } catch (error) {
-      console.error('GoLogin 프로필 로드 실패:', error);
+      console.error('AdsPower 프로필 로드 실패:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadAppCategories = async () => {
+    if (!apiKey) return;
+    try {
+      const result = await window.electronAPI.adspower.listAppCategories(apiKey);
+      const list: AppCategory[] = result.data?.list || [];
+      console.log('[ProfileManager] App categories:', JSON.stringify(list));
+      // 모바일 카테고리 제외
+      const desktopOnly = list.filter((cat) => !isMobileCategory(cat.name));
+      setAppCategories(desktopOnly);
+      // 기본 선택: 첫 번째 데스크톱 카테고리
+      if (desktopOnly.length > 0 && !selectedCategoryId) {
+        setSelectedCategoryId(desktopOnly[0].id);
+      }
+    } catch (error) {
+      console.error('어플리케이션 카테고리 로드 실패:', error);
     }
   };
 
@@ -54,12 +88,22 @@ function ProfileManager() {
     setProgress({ current: 0, total: createCount });
 
     try {
-      const startIndex = goLoginProfiles.length;
+      const startIndex = adsPowerProfiles.length;
 
       for (let i = 0; i < createCount; i++) {
-        const profileName = `gl-${String(startIndex + i + 1).padStart(3, '0')}`;
+        const profileName = `ads-${String(startIndex + i + 1).padStart(3, '0')}`;
 
-        const result = await window.electronAPI.gologin.createProfile(apiKey, profileName);
+        const profileData: any = {
+          name: profileName,
+          group_id: '0',
+          // 항상 데스크톱 카테고리 지정 (미지정 시 AdsPower가 랜덤 OS 할당)
+          sys_app_cate_id: selectedCategoryId || '0',
+          user_proxy_config: {
+            proxy_soft: 'no_proxy',
+          },
+        };
+
+        const result = await window.electronAPI.adspower.createProfile(apiKey, profileData);
 
         if (result.error) {
           throw new Error(`프로필 생성 실패 (${i + 1}/${createCount}): ${result.error}`);
@@ -67,7 +111,7 @@ function ProfileManager() {
 
         setProgress({ current: i + 1, total: createCount });
 
-        // API Rate Limit 방지
+        // API Rate Limit 방지 (120 RPM = 500ms)
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
@@ -82,10 +126,9 @@ function ProfileManager() {
     }
   };
 
-  const openEditModal = (profile: GoLoginProfile) => {
+  const openEditModal = (profile: AdsPowerProfile) => {
     setEditingProfile(profile);
     setEditName(profile.name);
-    setEditNotes(profile.notes || '');
   };
 
   const handleSaveEdit = async () => {
@@ -93,9 +136,8 @@ function ProfileManager() {
 
     setIsSaving(true);
     try {
-      const result = await window.electronAPI.gologin.updateProfile(apiKey, editingProfile.id, {
+      const result = await window.electronAPI.adspower.updateProfile(apiKey, editingProfile.user_id, {
         name: editName.trim(),
-        notes: editNotes,
       });
 
       if (result.error) {
@@ -122,7 +164,7 @@ function ProfileManager() {
 
     setIsDeleting(true);
     try {
-      const result = await window.electronAPI.gologin.deleteProfiles(apiKey, selectedProfiles);
+      const result = await window.electronAPI.adspower.deleteProfiles(apiKey, selectedProfiles);
       if (result.error) {
         alert(`삭제 실패: ${result.error}`);
         return;
@@ -139,10 +181,10 @@ function ProfileManager() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedProfiles.length === goLoginProfiles.length) {
+    if (selectedProfiles.length === adsPowerProfiles.length) {
       setSelectedProfiles([]);
     } else {
-      setSelectedProfiles(goLoginProfiles.map((p) => p.id));
+      setSelectedProfiles(adsPowerProfiles.map((p) => p.user_id));
     }
   };
 
@@ -152,25 +194,40 @@ function ProfileManager() {
     );
   };
 
-  const getProxyDisplay = (profile: GoLoginProfile) => {
-    if (!profile.proxy || profile.proxy.mode === 'none' || !profile.proxy.host) {
+  const getProxyDisplay = (profile: AdsPowerProfile) => {
+    const cfg = profile.user_proxy_config;
+    if (!cfg || cfg.proxy_type === 'noproxy' || !cfg.proxy_host) {
       return '-';
     }
-    return `${profile.proxy.mode}://${profile.proxy.host}:${profile.proxy.port || ''}`;
-  };
-
-  const stripHtml = (html: string) => {
-    return html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    return `${cfg.proxy_type}://${cfg.proxy_host}:${cfg.proxy_port || ''}`;
   };
 
   return (
     <div className="p-8">
-      <h2 className="text-3xl font-bold mb-6">GoLogin 프로필 관리</h2>
+      <h2 className="text-3xl font-bold mb-6">AdsPower 프로필 관리</h2>
 
       {/* 일괄 생성 영역 */}
       <div className="bg-white rounded-lg shadow-md p-6 mb-6">
         <h3 className="text-xl font-semibold mb-4">프로필 일괄 생성</h3>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">브라우저</label>
+            <select
+              value={selectedCategoryId}
+              onChange={(e) => setSelectedCategoryId(e.target.value)}
+              disabled={isCreating || appCategories.length === 0}
+              className="px-3 py-2 border rounded-lg text-sm"
+            >
+              {appCategories.length === 0 && (
+                <option value="">로딩 중...</option>
+              )}
+              {appCategories.map((cat) => (
+                <option key={cat.id} value={cat.id}>
+                  {cat.name}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-gray-700">생성 개수</label>
             <input
@@ -192,9 +249,12 @@ function ProfileManager() {
             {isCreating ? '생성 중...' : '일괄 생성'}
           </button>
           <span className="text-sm text-gray-400">
-            이름: gl-{String(goLoginProfiles.length + 1).padStart(3, '0')} ~ gl-{String(goLoginProfiles.length + createCount).padStart(3, '0')}
+            이름: ads-{String(adsPowerProfiles.length + 1).padStart(3, '0')} ~ ads-{String(adsPowerProfiles.length + createCount).padStart(3, '0')}
           </span>
         </div>
+        <p className="mt-2 text-xs text-gray-400">
+          * 모바일 브라우저는 자동으로 제외됩니다
+        </p>
 
         {/* 진행 바 */}
         {isCreating && (
@@ -226,7 +286,7 @@ function ProfileManager() {
               {isLoading ? '로딩 중...' : '새로고침'}
             </button>
             <div className="text-sm text-gray-500">
-              총 {goLoginProfiles.length}개 | 선택 {selectedProfiles.length}개
+              총 {adsPowerProfiles.length}개 | 선택 {selectedProfiles.length}개
             </div>
           </div>
         </div>
@@ -239,8 +299,8 @@ function ProfileManager() {
                   <input
                     type="checkbox"
                     checked={
-                      selectedProfiles.length === goLoginProfiles.length &&
-                      goLoginProfiles.length > 0
+                      selectedProfiles.length === adsPowerProfiles.length &&
+                      adsPowerProfiles.length > 0
                     }
                     onChange={toggleSelectAll}
                     className="rounded"
@@ -250,16 +310,10 @@ function ProfileManager() {
                   이름
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  OS
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  브라우저
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
                   프록시
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  메모
+                  그룹
                 </th>
                 <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase w-16">
                   작업
@@ -267,23 +321,19 @@ function ProfileManager() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {goLoginProfiles.map((profile) => (
-                <tr key={profile.id}>
+              {adsPowerProfiles.map((profile) => (
+                <tr key={profile.user_id}>
                   <td className="px-6 py-4">
                     <input
                       type="checkbox"
-                      checked={selectedProfiles.includes(profile.id)}
-                      onChange={() => toggleSelect(profile.id)}
+                      checked={selectedProfiles.includes(profile.user_id)}
+                      onChange={() => toggleSelect(profile.user_id)}
                       className="rounded"
                     />
                   </td>
                   <td className="px-6 py-4 text-sm font-medium">{profile.name}</td>
-                  <td className="px-6 py-4 text-sm text-gray-500">{profile.os || '-'}</td>
-                  <td className="px-6 py-4 text-sm text-gray-500">{profile.browserType || '-'}</td>
                   <td className="px-6 py-4 text-sm text-gray-500">{getProxyDisplay(profile)}</td>
-                  <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
-                    {profile.notes ? stripHtml(profile.notes) : '-'}
-                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-500">{profile.group_name || '-'}</td>
                   <td className="px-6 py-4 text-center">
                     <button
                       onClick={() => openEditModal(profile)}
@@ -297,7 +347,7 @@ function ProfileManager() {
             </tbody>
           </table>
 
-          {goLoginProfiles.length === 0 && !isLoading && (
+          {adsPowerProfiles.length === 0 && !isLoading && (
             <div className="text-center py-12 text-gray-500">프로필이 없습니다.</div>
           )}
           {isLoading && (
@@ -306,7 +356,7 @@ function ProfileManager() {
         </div>
 
         {/* 하단 액션 버튼 */}
-        {goLoginProfiles.length > 0 && (
+        {adsPowerProfiles.length > 0 && (
           <div className="p-6 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
             <button
               onClick={handleDeleteSelected}
@@ -336,16 +386,6 @@ function ProfileManager() {
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                   className="w-full px-4 py-2 border rounded-lg"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">메모</label>
-                <textarea
-                  value={editNotes}
-                  onChange={(e) => setEditNotes(e.target.value)}
-                  rows={3}
-                  className="w-full px-4 py-2 border rounded-lg resize-none"
-                  placeholder="메모 입력 (선택)"
                 />
               </div>
               <div className="flex gap-3">

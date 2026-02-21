@@ -8,8 +8,9 @@
  */
 
 import { CrawlerBrowser, type BrowserStatusInfo } from "./CrawlerBrowser";
+import { adsPowerQueue } from "./adspower-queue";
 import { getProxyPool } from "../proxy-pool";
-import * as gologin from "../../services/gologin";
+import * as adspower from "../../services/adspower";
 import * as db from "../../database/sqlite";
 
 // 프로필 정보
@@ -108,7 +109,7 @@ class BrowserManager {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, groupAssignments.length);
       const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, k) => batchStart + k);
 
-      // 첫 배치가 아니면 5초 대기 (GoLogin API 부하 방지)
+      // 첫 배치가 아니면 5초 대기 (AdsPower API 부하 방지)
       if (batchStart > 0) {
         console.log(`[BrowserManager] Waiting 5s before next batch...`);
         await this.delay(5000);
@@ -373,19 +374,25 @@ class BrowserManager {
       // 이미 죽어있을 수 있음
     }
 
-    // 2. 새 프로필 생성 (GoLogin API)
-    const newProfile = await gologin.createProfile(this.apiKey, profileName);
-    const newProfileId = newProfile.id;
+    // 2. 새 프로필 생성 (AdsPower API - 큐를 통해 rate limit 준수)
+    const createResult = await adsPowerQueue.enqueue(
+      `createProfile ${profileName}`,
+      () => adspower.createProfile(this.apiKey, {
+        name: profileName,
+        group_id: '0',
+        sys_app_cate_id: '0', // 0 = Chrome Windows (데스크톱)
+        user_proxy_config: {
+          proxy_soft: 'no_proxy',
+        },
+      }),
+    );
+    const newProfileId = createResult.data?.id;
+    if (!newProfileId) {
+      throw new Error('AdsPower createProfile did not return profile id');
+    }
     console.log(`[BrowserManager] New profile created: ${newProfileId} (name: ${profileName})`);
 
-    // 3. 핑거프린트 강화
-    try {
-      await gologin.hardenProfile(this.apiKey, newProfileId);
-    } catch (e: any) {
-      console.log(`[BrowserManager] Harden failed for new profile (무시): ${e.message}`);
-    }
-
-    // 4. 새 CrawlerBrowser 인스턴스 생성
+    // 3. 새 CrawlerBrowser 인스턴스 생성
     const newBrowser = new CrawlerBrowser({
       profileId: newProfileId,
       profileName,
@@ -394,12 +401,15 @@ class BrowserManager {
       proxyGroupName,
     });
 
-    // 5. Map 교체
+    // 4. Map 교체
     this.replaceBrowser(oldProfileId, newBrowser);
 
-    // 6. 구 프로필 삭제 (안전하게 마지막에)
+    // 5. 구 프로필 삭제 (안전하게 마지막에, 큐를 통해 rate limit 준수)
     try {
-      await gologin.deleteProfile(this.apiKey, oldProfileId);
+      await adsPowerQueue.enqueue(
+        `deleteProfile ${oldProfileId}`,
+        () => adspower.deleteProfile(this.apiKey, oldProfileId),
+      );
       console.log(`[BrowserManager] Old profile deleted: ${oldProfileId}`);
     } catch (e: any) {
       console.log(`[BrowserManager] Old profile delete failed (무시): ${e.message}`);
