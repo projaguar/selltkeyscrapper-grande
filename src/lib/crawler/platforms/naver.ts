@@ -4,6 +4,7 @@
 
 import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
+import { logBlocked } from "../restart-logger";
 
 /**
  * CAPTCHA 감지
@@ -105,6 +106,7 @@ export async function crawlNaver(
   // CAPTCHA 체크
   if (await detectNaverCaptcha(page)) {
     console.log(`[Naver] ${profileName} - CAPTCHA detected!`);
+    logBlocked("NAVER_CAPTCHA", profileName);
     return {
       success: false,
       urlNum: task.URLNUM,

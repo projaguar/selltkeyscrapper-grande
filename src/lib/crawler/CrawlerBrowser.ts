@@ -41,6 +41,7 @@ export interface BrowserStatusInfo {
   profileId: string;
   profileName: string;
   status: BrowserStatus;
+  platform?: string;
   proxyGroupName?: string;
   proxyIp?: string;
   storeName?: string;
@@ -90,6 +91,7 @@ export class CrawlerBrowser {
   private message?: string;
   private storeName?: string;
   private collectedCount?: number;
+  private platform?: string;
   private error?: string;
 
   // 의존성
@@ -586,9 +588,10 @@ export class CrawlerBrowser {
       this.error = message;
     }
 
-    // 상태 변경 시 일부 필드 초기화
-    if (status === "ready" || status === "waiting") {
+    // ready 상태에서만 초기화 (waiting은 이전 작업 정보 유지)
+    if (status === "ready") {
       this.storeName = undefined;
+      this.platform = undefined;
       this.collectedCount = undefined;
     }
   }
@@ -596,9 +599,10 @@ export class CrawlerBrowser {
   /**
    * 크롤링 작업 시작
    */
-  startCrawling(storeName: string): void {
+  startCrawling(storeName: string, platform?: string): void {
     this.updateStatus("crawling", "크롤링 중...");
     this.storeName = storeName;
+    this.platform = platform;
     this.collectedCount = undefined;
   }
 
@@ -622,6 +626,7 @@ export class CrawlerBrowser {
       profileId: this.profileId,
       profileName: this.profileName,
       status: this.status,
+      platform: this.platform,
       proxyGroupName: this.proxyGroupName,
       proxyIp: this.proxyIp ? `${this.proxyIp}:${this.proxyPort}` : undefined,
       storeName: this.storeName,

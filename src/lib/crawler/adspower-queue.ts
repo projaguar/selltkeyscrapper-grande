@@ -19,7 +19,7 @@ class AdsPowerQueueManager {
   private queue: QueueTask[] = [];
   private processing: boolean = false;
   private lastRequestTime: number = 0;
-  private readonly MIN_INTERVAL_MS = 600; // 안전 마진 포함 (120 RPM = 500ms + 100ms 여유)
+  private readonly MIN_INTERVAL_MS = 510; // 120 RPM = 500ms + 10ms 여유
 
   // 현재 작업 중인 브라우저 추적 (start/stop 중복 방지)
   private activeBrowsers: Set<string> = new Set();

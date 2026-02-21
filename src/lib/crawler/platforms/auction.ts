@@ -4,6 +4,7 @@
 
 import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
+import { logBlocked } from "../restart-logger";
 
 /**
  * Cloudflare 블록 감지
@@ -177,12 +178,14 @@ export async function crawlAuction(
   // Cloudflare 블록 체크 (브라우저 재시작 필요)
   if (await detectCloudflareBlock(page)) {
     console.log(`[Auction] ${profileName} - Cloudflare block detected!`);
+    logBlocked("AUCTION", profileName);
     throw new Error("Cloudflare block detected - IP change needed");
   }
 
   // CAPTCHA 체크
   if (await detectAuctionCaptcha(page)) {
     console.log(`[Auction] ${profileName} - CAPTCHA detected!`);
+    logBlocked("AUCTION_CAPTCHA", profileName);
     return {
       success: false,
       urlNum: task.URLNUM,

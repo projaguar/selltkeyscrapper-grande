@@ -115,6 +115,37 @@ export function initRestartLogger(userDataPath: string): void {
 }
 
 // ========================================
+// 블록 로그 (사이트별 차단 기록)
+// ========================================
+
+let blockLogFilePath: string | null = null;
+
+function ensureBlockLogFile(): void {
+  if (blockLogFilePath) return;
+  if (!logFilePath) return;
+  const logDir = dirname(logFilePath);
+  const today = new Date().toISOString().slice(0, 10);
+  blockLogFilePath = join(logDir, `blocked-${today}.tsv`);
+  if (!existsSync(blockLogFilePath)) {
+    appendFileSync(blockLogFilePath, "시간\t사이트\t프로필\n");
+  }
+}
+
+export function logBlocked(site: string, profileName: string): void {
+  const timestamp = new Date().toISOString().slice(11, 19);
+  console.log(`[Blocked] ${site} | ${profileName}`);
+
+  ensureBlockLogFile();
+  if (blockLogFilePath) {
+    try {
+      appendFileSync(blockLogFilePath, `${timestamp}\t${site}\t${profileName}\n`);
+    } catch {
+      // 파일 쓰기 실패 무시
+    }
+  }
+}
+
+// ========================================
 // 로그 기록
 // ========================================
 

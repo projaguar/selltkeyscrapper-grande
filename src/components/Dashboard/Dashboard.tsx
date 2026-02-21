@@ -17,11 +17,12 @@ type BrowserStatus =
 interface BrowserStatusInfo {
   profileName: string;
   status: BrowserStatus;
+  platform?: string;
   storeName?: string;
   message?: string;
   collectedCount?: number;
-  proxyGroupName?: string;  // 프록시 그룹 이름
-  proxyIp?: string;  // 현재 사용 중인 프록시 IP
+  proxyGroupName?: string;
+  proxyIp?: string;
   error?: string;
 }
 
@@ -453,46 +454,39 @@ function Dashboard() {
               );
             })()}
 
-            {/* 브라우저 상태 목록 */}
+            {/* 브라우저 상태 목록 (컴팩트 그리드) */}
             {progress.browserStatuses && progress.browserStatuses.length > 0 && (
               <div className="mt-6">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">브라우저 상태</h4>
-                <div className="space-y-2">
+                <h4 className="text-sm font-semibold text-gray-700 mb-2">브라우저 상태</h4>
+                <div className="grid grid-cols-5 gap-1">
                   {progress.browserStatuses.map((browser) => (
                     <div
                       key={browser.profileName}
-                      className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
+                      className={`p-1.5 rounded border ${getStatusColor(browser.status)}`}
                     >
-                      <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <span className="text-lg flex-shrink-0">{getStatusIcon(browser.status)}</span>
-                        <div className="flex-1 min-w-0">
-                          <div className="font-medium text-gray-800">
-                            {browser.profileName}
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-gray-500 mt-0.5">
-                            {browser.proxyGroupName && (
-                              <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
-                                {browser.proxyGroupName}
-                              </span>
-                            )}
-                            {browser.proxyIp && (
-                              <span>🌐 {browser.proxyIp}</span>
-                            )}
-                          </div>
-                        </div>
+                      <div className="text-xs font-bold text-gray-800 truncate">
+                        {browser.profileName}
                       </div>
-                      <div className="text-sm text-right flex-shrink-0 ml-3">
-                        {browser.storeName && (
-                          <div className="font-medium text-gray-700">{browser.storeName}</div>
-                        )}
-                        <div className="text-gray-500">
-                          {browser.message || (browser.status === 'idle' ? '대기 중' : '')}
-                          {browser.collectedCount !== undefined && browser.collectedCount > 0 && (
-                            <span className="ml-1 text-green-600 font-semibold">
-                              ({browser.collectedCount}개)
-                            </span>
+                      {browser.storeName && (
+                        <div className="text-xs text-gray-600 truncate">
+                          {browser.platform === 'NAVER' && (
+                            <span className="inline-block w-3.5 text-center font-bold text-green-700 mr-0.5">N</span>
                           )}
+                          {browser.platform === 'AUCTION' && (
+                            <span className="inline-block w-3.5 text-center font-bold text-red-700 mr-0.5">A</span>
+                          )}
+                          {browser.storeName}
                         </div>
+                      )}
+                      <div className="text-xs text-gray-500 truncate">
+                        {(browser.status === 'idle' || browser.status === 'waiting')
+                          ? '대기 중'
+                          : (browser.message || '')}
+                        {browser.collectedCount !== undefined && browser.collectedCount > 0 && (
+                          <span className="ml-0.5 text-green-600 font-semibold">
+                            ({browser.collectedCount}개)
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -538,27 +532,17 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* 각 브라우저 상태 */}
-          <div className="space-y-2">
+          {/* 각 브라우저 상태 (컴팩트 그리드) */}
+          <div className="grid grid-cols-5 gap-1">
             {preparingStatuses.map((browser) => (
               <div
                 key={browser.profileName}
-                className={`flex items-center justify-between p-3 rounded-lg border ${getStatusColor(browser.status)}`}
+                className={`p-1.5 rounded border ${getStatusColor(browser.status)}`}
               >
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <span className="text-lg flex-shrink-0">{getStatusIcon(browser.status)}</span>
-                  <div className="flex-1 min-w-0">
-                    <span className="font-medium text-gray-800">
-                      {browser.profileName}
-                    </span>
-                    {browser.proxyGroupName && (
-                      <span className="ml-2 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">
-                        {browser.proxyGroupName}
-                      </span>
-                    )}
-                  </div>
+                <div className="text-xs font-bold text-gray-800 truncate">
+                  {browser.profileName}
                 </div>
-                <div className="text-sm text-gray-500 flex-shrink-0 ml-3">
+                <div className="text-xs text-gray-500 truncate">
                   {browser.message}
                 </div>
               </div>

@@ -51,6 +51,7 @@ import { getProxyPool } from "./proxy-pool";
 import {
   initRestartLogger,
   logRestart,
+  logBlocked,
   incrementStat,
   resetRestartStats,
 } from "./crawler/restart-logger";
@@ -214,7 +215,7 @@ async function browserWorker(
     }
 
     // Task 처리 시작
-    browser.startCrawling(task.TARGETSTORENAME);
+    browser.startCrawling(task.TARGETSTORENAME, task.URLPLATFORMS);
 
     try {
       // Task 처리
@@ -305,7 +306,13 @@ async function browserWorker(
         consecutiveDeadErrors = 0;
         const cat = logRestart({ profileName, workerIndex, reason: errorMsg, errorMsg });
         incrementStat(cat);
-        await handleBrowserRestart(holder, workerIndex, `${cat}: ${errorMsg}`);
+
+        if (cat === "BLOCKED") {
+          // BLOCKED: 프로필 재생성 (새 fingerprint + 새 proxy)
+          await handleBrowserRecreation(holder, workerIndex, `${cat}: ${errorMsg}`);
+        } else {
+          await handleBrowserRestart(holder, workerIndex, `${cat}: ${errorMsg}`);
+        }
       }
     }
 
@@ -1077,6 +1084,7 @@ async function navigateToTarget(
       `[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
     );
     if (result === "blocked") {
+      logBlocked("AUCTION", profileName);
       throw new Error("Cloudflare block detected - IP change needed");
     }
   } else if (task.URLPLATFORMS === "NAVER") {
