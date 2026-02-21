@@ -48,6 +48,12 @@ import {
 import { crawlNaver } from "./crawler/platforms/naver";
 import { crawlAuction } from "./crawler/platforms/auction";
 import { getProxyPool } from "./proxy-pool";
+import {
+  initRestartLogger,
+  logRestart,
+  incrementStat,
+  resetRestartStats,
+} from "./crawler/restart-logger";
 
 // 실제 오류로 분류할 키워드
 const ERROR_KEYWORDS = [
@@ -183,11 +189,11 @@ async function browserWorker(
         await delay(3000);
         continue;
       }
-      console.log(
-        `[Worker ${workerIndex}] ${profileName} - 에러 상태 감지, 자동 복구 시도`,
-      );
+      const errorInfo = browser.getStatus().error || "unknown";
+      const cat = logRestart({ profileName, workerIndex, reason: "브라우저 에러 복구", errorMsg: errorInfo });
+      incrementStat(cat);
       if (!shouldStop()) {
-        await handleBrowserRestart(holder, workerIndex, "브라우저 에러 복구");
+        await handleBrowserRestart(holder, workerIndex, `브라우저 에러 복구 [${cat}]`);
       }
       consecutiveDeadErrors = 0;
       // 복구 후 잠시 대기
@@ -239,6 +245,8 @@ async function browserWorker(
 
       // CAPTCHA 감지 시 프로필 재생성 (새 fingerprint + 새 proxy)
       if (result.captchaDetected && !shouldStop()) {
+        logRestart({ profileName, workerIndex, reason: "CAPTCHA 감지", category: "CAPTCHA" });
+        incrementStat("CAPTCHA");
         await handleBrowserRecreation(holder, workerIndex, "CAPTCHA 감지");
       }
     } catch (error: any) {
@@ -264,17 +272,19 @@ async function browserWorker(
 
         if (consecutiveDeadErrors >= MAX_DEAD_ERRORS) {
           consecutiveDeadErrors = 0;
+          const cat = logRestart({ profileName, workerIndex, reason: "브라우저 프로세스 죽음", errorMsg });
+          incrementStat(cat);
           await handleBrowserRestart(
             holder,
             workerIndex,
-            "브라우저 프로세스 죽음",
+            `브라우저 프로세스 죽음 [${cat}]`,
           );
         }
         continue;
       }
 
-      // 네트워크 오류인지 확인
-      const NETWORK_ERROR_PATTERNS = [
+      // 네트워크/차단 오류인지 확인
+      const RESTART_ERROR_PATTERNS = [
         "ECONNREFUSED",
         "net::ERR_",
         "페이지 로드 실패",
@@ -286,14 +296,16 @@ async function browserWorker(
         "IP change needed",
       ];
 
-      const isNetworkError = NETWORK_ERROR_PATTERNS.some((pattern) =>
+      const needsRestart = RESTART_ERROR_PATTERNS.some((pattern) =>
         errorMsg.includes(pattern),
       );
 
-      // 네트워크 오류면 브라우저 재시작
-      if (isNetworkError) {
+      // 재시작 필요 시 원인 분류 후 로그 기록
+      if (needsRestart) {
         consecutiveDeadErrors = 0;
-        await handleBrowserRestart(holder, workerIndex, "네트워크 오류");
+        const cat = logRestart({ profileName, workerIndex, reason: errorMsg, errorMsg });
+        incrementStat(cat);
+        await handleBrowserRestart(holder, workerIndex, `${cat}: ${errorMsg}`);
       }
     }
 
@@ -634,6 +646,8 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
             );
 
             // 브라우저 재시작 (새 Proxy로 — 죽은 브라우저도 stop → start로 복구, getNextProxy에서 이미 in_use로 마킹됨)
+            logRestart({ profileName, workerIndex: -1, reason: "IP 일괄 변경", category: "IP_CHANGE" });
+            incrementStat("IP_CHANGE");
             await browser.restart(newProxy);
 
             console.log(
@@ -726,7 +740,17 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   // 크롤러 상태 설정
   setRunning(true);
   resetProgress();
+  resetRestartStats();
   ipChangeInProgress = false;
+
+  // 재시작 로거 초기화 (userData/logs/restart-YYYY-MM-DD.tsv)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { app } = require("electron");
+    initRestartLogger(app.getPath("userData"));
+  } catch {
+    // electron 미사용 환경에서는 무시
+  }
 
   const browsers = browserManager.getBrowsers();
   const batchSize = browsers.length;

@@ -213,8 +213,8 @@ export class CrawlerBrowser {
         defaultViewport: null,
       });
 
-      // 3. 브라우저 초기화 대기
-      await this.delay(2000);
+      // 3. 브라우저 초기화 대기 (open_urls로 네이버 자동 로드)
+      await this.delay(1000);
 
       // 4. 탭 정리 (1개만 유지)
       await this.cleanupTabs();
@@ -266,8 +266,9 @@ export class CrawlerBrowser {
 
   /**
    * 브라우저 중지 (puppeteer disconnect + AdsPower API stop)
+   * @param fireAndForget true면 stop API 응답을 기다리지 않음 (재시작 시 속도 최적화)
    */
-  async stop(): Promise<void> {
+  async stop(fireAndForget = false): Promise<void> {
     // puppeteer 연결 해제
     if (this.browser) {
       try {
@@ -278,15 +279,22 @@ export class CrawlerBrowser {
       this.browser = undefined;
     }
 
-    // AdsPower API로 브라우저 종료 (큐를 통해 rate limit 준수)
-    try {
-      await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
-    } catch (e: any) {
-      console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
-    }
-
     // 리소스 차단 설정 플래그 리셋 (재시작 시 다시 설정할 수 있도록)
     this.requestInterceptionSetup = false;
+
+    // AdsPower API로 브라우저 종료
+    if (fireAndForget) {
+      // fire-and-forget: 응답 기다리지 않음 (재시작 시 속도 최적화)
+      adsPowerQueue.stopBrowser(this.apiKey, this.profileId).catch((e: any) => {
+        console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
+      });
+    } else {
+      try {
+        await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
+      } catch (e: any) {
+        console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
+      }
+    }
 
     this.updateStatus("stopped", "중지됨");
   }
@@ -311,8 +319,9 @@ export class CrawlerBrowser {
     this.updateStatus("restarting", "재시작 중...");
 
     try {
-      await this.stop();
-      await this.delay(2000);
+      // stop API 응답을 기다리지 않고 즉시 진행 (fire-and-forget)
+      await this.stop(true);
+      await this.delay(500);
 
       if (newProxy) {
         await this.updateProxySettings(newProxy);
