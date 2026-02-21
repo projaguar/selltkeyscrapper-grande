@@ -34,10 +34,13 @@ export async function listProfiles(apiKey: string, page = 1, pageSize = 100) {
  * 프로필 생성
  */
 export async function createProfile(apiKey: string, profileData: any) {
-  return makeRequest('/api/v1/user/create', apiKey, {
+  console.log('[AdsPower] createProfile request:', JSON.stringify(profileData));
+  const result = await makeRequest('/api/v1/user/create', apiKey, {
     method: 'POST',
     body: JSON.stringify(profileData),
   });
+  console.log('[AdsPower] createProfile response:', JSON.stringify(result.data));
+  return result;
 }
 
 /**
@@ -102,5 +105,7 @@ export async function getProfile(apiKey: string, profileId: string) {
  * 어플리케이션 카테고리 목록 조회 (브라우저 타입: Chrome, Firefox, Android 등)
  */
 export async function listApplicationCategories(apiKey: string, page = 1, pageSize = 100) {
-  return makeRequest(`/api/v1/application/list?page=${page}&page_size=${pageSize}`, apiKey);
+  const result = await makeRequest(`/api/v1/application/list?page=${page}&page_size=${pageSize}`, apiKey);
+  console.log('[AdsPower] App categories:', JSON.stringify(result.data?.list));
+  return result;
 }

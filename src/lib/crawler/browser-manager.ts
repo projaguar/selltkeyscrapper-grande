@@ -380,7 +380,12 @@ class BrowserManager {
       () => adspower.createProfile(this.apiKey, {
         name: profileName,
         group_id: '0',
-        sys_app_cate_id: '0', // 0 = Chrome Windows (데스크톱)
+        fingerprint_config: {
+          random_ua: {
+            ua_browser: ['chrome'],
+            ua_system_version: ['Windows 10', 'Windows 11', 'Mac OS X 12', 'Mac OS X 13'],
+          },
+        },
         user_proxy_config: {
           proxy_soft: 'no_proxy',
         },

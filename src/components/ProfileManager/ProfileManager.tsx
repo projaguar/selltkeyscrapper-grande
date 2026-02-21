@@ -2,20 +2,6 @@ import { useState, useEffect } from 'react';
 import { useStore } from '../../store';
 import type { AdsPowerProfile } from '../../store';
 
-interface AppCategory {
-  id: string;
-  name: string;
-  remark?: string;
-}
-
-// 모바일 카테고리 판별 키워드
-const MOBILE_KEYWORDS = ['android', 'ios', 'iphone', 'ipad', 'mobile', 'phone', 'tablet'];
-
-function isMobileCategory(name: string): boolean {
-  const lower = name.toLowerCase();
-  return MOBILE_KEYWORDS.some((kw) => lower.includes(kw));
-}
-
 function ProfileManager() {
   const { apiKey, adsPowerProfiles, setAdsPowerProfiles } = useStore();
   const [selectedProfiles, setSelectedProfiles] = useState<string[]>([]);
@@ -27,10 +13,6 @@ function ProfileManager() {
   const [isCreating, setIsCreating] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
 
-  // 어플리케이션 카테고리 (브라우저 타입)
-  const [appCategories, setAppCategories] = useState<AppCategory[]>([]);
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
-
   // 편집 모달 상태
   const [editingProfile, setEditingProfile] = useState<AdsPowerProfile | null>(null);
   const [editName, setEditName] = useState('');
@@ -38,7 +20,6 @@ function ProfileManager() {
 
   useEffect(() => {
     loadProfiles();
-    loadAppCategories();
   }, []);
 
   const loadProfiles = async () => {
@@ -53,24 +34,6 @@ function ProfileManager() {
       console.error('AdsPower 프로필 로드 실패:', error);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const loadAppCategories = async () => {
-    if (!apiKey) return;
-    try {
-      const result = await window.electronAPI.adspower.listAppCategories(apiKey);
-      const list: AppCategory[] = result.data?.list || [];
-      console.log('[ProfileManager] App categories:', JSON.stringify(list));
-      // 모바일 카테고리 제외
-      const desktopOnly = list.filter((cat) => !isMobileCategory(cat.name));
-      setAppCategories(desktopOnly);
-      // 기본 선택: 첫 번째 데스크톱 카테고리
-      if (desktopOnly.length > 0 && !selectedCategoryId) {
-        setSelectedCategoryId(desktopOnly[0].id);
-      }
-    } catch (error) {
-      console.error('어플리케이션 카테고리 로드 실패:', error);
     }
   };
 
@@ -96,8 +59,12 @@ function ProfileManager() {
         const profileData: any = {
           name: profileName,
           group_id: '0',
-          // 항상 데스크톱 카테고리 지정 (미지정 시 AdsPower가 랜덤 OS 할당)
-          sys_app_cate_id: selectedCategoryId || '0',
+          fingerprint_config: {
+            random_ua: {
+              ua_browser: ['chrome'],
+              ua_system_version: ['Windows 10', 'Windows 11', 'Mac OS X 12', 'Mac OS X 13'],
+            },
+          },
           user_proxy_config: {
             proxy_soft: 'no_proxy',
           },
@@ -211,24 +178,6 @@ function ProfileManager() {
         <h3 className="text-xl font-semibold mb-4">프로필 일괄 생성</h3>
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-gray-700">브라우저</label>
-            <select
-              value={selectedCategoryId}
-              onChange={(e) => setSelectedCategoryId(e.target.value)}
-              disabled={isCreating || appCategories.length === 0}
-              className="px-3 py-2 border rounded-lg text-sm"
-            >
-              {appCategories.length === 0 && (
-                <option value="">로딩 중...</option>
-              )}
-              {appCategories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-gray-700">생성 개수</label>
             <input
               type="number"
@@ -253,7 +202,7 @@ function ProfileManager() {
           </span>
         </div>
         <p className="mt-2 text-xs text-gray-400">
-          * 모바일 브라우저는 자동으로 제외됩니다
+          * Chrome (Windows / macOS) 데스크톱 프로필로 생성됩니다
         </p>
 
         {/* 진행 바 */}
