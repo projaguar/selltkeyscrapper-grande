@@ -118,6 +118,9 @@ interface BrowserHolder {
   browser: CrawlerBrowser;
 }
 
+// IP 일괄 변경 중 플래그 (worker가 중복 재시작하지 않도록)
+let ipChangeInProgress = false;
+
 // 브라우저 죽음을 감지하는 에러 패턴
 const DEAD_BROWSER_PATTERNS = [
   'Browser not available',
@@ -152,6 +155,12 @@ async function browserWorker(
     const browser = holder.browser;
     const profileName = browser.getProfileName();
 
+    // IP 일괄 변경 중이면 대기 (taskFetcher가 changeAllBrowserIPs 수행 중)
+    if (ipChangeInProgress) {
+      await delay(3000);
+      continue;
+    }
+
     // 재시작 중이면 대기
     if (browser.getStatus().status === 'restarting') {
       await delay(3000);
@@ -160,6 +169,11 @@ async function browserWorker(
 
     // 브라우저 에러 시 자동 복구 시도
     if (browser.hasError()) {
+      // IP 일괄 변경 직후 에러 상태면 무시 (changeAllBrowserIPs가 이미 처리)
+      if (ipChangeInProgress) {
+        await delay(3000);
+        continue;
+      }
       console.log(`[Worker ${workerIndex}] ${profileName} - 에러 상태 감지, 자동 복구 시도`);
       if (!shouldStop()) {
         await handleBrowserRestart(holder, workerIndex, '브라우저 에러 복구');
@@ -490,6 +504,9 @@ async function changeAllBrowserIPs(
 
   console.log(`[IPChange] Starting IP change for ${holders.length} browsers (batch size: ${BATCH_SIZE}, max retries: ${maxRetries})`);
 
+  // worker가 중복 재시작하지 않도록 플래그 설정
+  ipChangeInProgress = true;
+
   for (let batchStart = 0; batchStart < holders.length; batchStart += BATCH_SIZE) {
     const batchEnd = Math.min(batchStart + BATCH_SIZE, holders.length);
     const batch = holders.slice(batchStart, batchEnd);
@@ -551,6 +568,9 @@ async function changeAllBrowserIPs(
     }));
   }
 
+  // 플래그 해제 — worker가 다시 에러 감지 및 복구 가능
+  ipChangeInProgress = false;
+
   const successCount = holders.filter(h => h.browser.getStatus().status !== 'error').length;
   console.log(`[IPChange] IP change completed: ${successCount}/${holders.length} browsers ready`);
 }
@@ -609,6 +629,7 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   // 크롤러 상태 설정
   setRunning(true);
   resetProgress();
+  ipChangeInProgress = false;
 
   const browsers = browserManager.getBrowsers();
   const batchSize = browsers.length;
