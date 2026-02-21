@@ -90,7 +90,7 @@ export async function launchBrowser(apiKey: string, profileId: string) {
     profileId,
     // GoLogin 내부 프록시 체크(getTimeZone) 타임아웃: 기본 13초 → 30초
     proxyCheckTimeout: 30 * 1000,
-    // 이전 세션 복원 비활성화 → startUrl(example.com)로 시작
+    // 이전 세션 복원 비활성화 → startUrl(naver.com)로 시작
     restoreLastSession: false,
   };
 
@@ -184,9 +184,9 @@ export async function hardenProfile(apiKey: string, profileId: string): Promise<
   }
 
   // startUrl: 브라우저 시작 시 안전한 페이지로 열기 (이전 크롤링 페이지 복원 방지)
-  if (profile.startUrl !== 'https://www.example.com') {
-    profile.startUrl = 'https://www.example.com';
-    changes.push('startUrl: example.com 설정');
+  if (profile.startUrl !== 'https://www.naver.com') {
+    profile.startUrl = 'https://www.naver.com';
+    changes.push('startUrl: naver.com 설정');
     needsUpdate = true;
   }
 

@@ -245,20 +245,20 @@ export class CrawlerBrowser {
    * 브라우저 중지 (GoLogin SDK exit)
    */
   async stop(): Promise<void> {
-    // 종료 전 안전한 페이지로 이동 (세션 복원 시 크롤링 페이지 대신 example.com 열리도록)
+    // 종료 전 안전한 페이지로 이동 (세션 복원 시 크롤링 페이지 대신 naver.com 열리도록)
     if (this.browser) {
       try {
         const pages = await this.browser.pages();
         if (pages.length > 0) {
           await pages[0].evaluate(() => window.stop()).catch(() => {});
-          await pages[0].goto('https://www.example.com', {
+          await pages[0].goto('https://www.naver.com', {
             waitUntil: 'domcontentloaded',
             timeout: 10000,
           });
-          console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 example.com 이동 완료`);
+          console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 naver.com 이동 완료`);
         }
       } catch (e: any) {
-        console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 example.com 이동 실패: ${e.message}`);
+        console.log(`[CrawlerBrowser] ${this.profileName} - 종료 전 naver.com 이동 실패: ${e.message}`);
       }
     }
 
