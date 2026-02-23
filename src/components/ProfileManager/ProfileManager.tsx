@@ -60,6 +60,7 @@ function ProfileManager() {
           name: profileName,
           group_id: '0',
           fingerprint_config: {
+            language: ['ko-KR', 'ko', 'en-US', 'en'],
             random_ua: {
               ua_browser: ['chrome'],
               ua_system_version: ['Windows 10', 'Windows 11', 'Mac OS X 12', 'Mac OS X 13'],
