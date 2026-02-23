@@ -34,6 +34,15 @@ export class TaskQueueManager {
   }
 
   /**
+   * Task를 큐 맨 앞에 반환 (health check 실패 시 재처리용)
+   */
+  returnTask(task: CrawlTask): void {
+    this.processing.delete(task.URLNUM);
+    this.queue.unshift(task);
+    console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) returned to queue`);
+  }
+
+  /**
    * Queue에 새로운 Tasks 추가 (Producer용)
    */
   addTasks(tasks: CrawlTask[]): void {

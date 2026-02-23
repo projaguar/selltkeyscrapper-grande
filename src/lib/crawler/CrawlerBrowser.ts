@@ -552,21 +552,26 @@ export class CrawlerBrowser {
   }
 
   /**
-   * Keepalive (WebSocket 연결 유지 + 죽음 감지)
+   * Keepalive (WebSocket 연결 유지 + Frame 레벨 죽음 감지)
+   * browser.pages()만으로는 stale frame을 감지할 수 없으므로
+   * page.evaluate()로 실제 frame context가 살아있는지 확인
    */
   async keepalive(): Promise<void> {
     if (!this.browser) return;
+    if (this.status === 'error' || this.status === 'restarting' || this.status === 'stopped') return;
 
     try {
-      await this.browser.pages();
-    } catch {
-      // 연결 실패 → 브라우저 죽음 감지 (restarting 중이면 무시)
-      if (this.status !== 'error' && this.status !== 'restarting' && this.status !== 'stopped') {
-        console.log(`[CrawlerBrowser] ${this.profileName} - keepalive 실패, 브라우저 죽음 감지`);
-        this.browser = undefined;
-        this.requestInterceptionSetup = false;
-        this.updateStatus('error', 'Browser process died');
+      const pages = await this.browser.pages();
+      if (pages.length > 0) {
+        // Frame 레벨 health check: 실제 JavaScript 실행 가능한지 확인
+        await pages[0].evaluate(() => 1);
       }
+    } catch {
+      // 연결 실패 또는 frame stale → 브라우저 죽음 감지
+      console.log(`[CrawlerBrowser] ${this.profileName} - keepalive 실패, 브라우저 죽음 감지`);
+      this.browser = undefined;
+      this.requestInterceptionSetup = false;
+      this.updateStatus('error', 'Browser process died');
     }
   }
 

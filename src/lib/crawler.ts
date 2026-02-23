@@ -145,6 +145,9 @@ const DEAD_BROWSER_PATTERNS = [
   "Session closed",
   "Protocol error",
   "Browser process died",
+  "Attempted to use",       // 장시간 idle 후 stale frame
+  "detached Frame",         // CDP frame detached
+  "Execution context was destroyed",  // frame context 무효화
 ];
 
 /**
@@ -210,6 +213,23 @@ async function browserWorker(
       for (let i = 0; i < 10 && !shouldStop(); i++) {
         await delay(1000);
       }
+      continue;
+    }
+
+    // Task 처리 전 브라우저 연결 상태 검증 (stale frame 사전 감지)
+    try {
+      const page = await browser.getPage();
+      await page.evaluate(() => 1);
+    } catch (healthErr: any) {
+      console.log(
+        `[Worker ${workerIndex}] ${profileName} - 태스크 전 health check 실패: ${healthErr.message}`,
+      );
+      // Task를 큐에 반환하고 브라우저 에러 상태로 전환 → 다음 루프에서 자동 복구
+      taskQueue.returnTask(task);
+      browser.completeCrawling("error", healthErr.message);
+      const cat = logRestart({ profileName, workerIndex, reason: "태스크 전 health check 실패", errorMsg: healthErr.message });
+      incrementStat(cat);
+      await handleBrowserRestart(holder, workerIndex, `health check 실패 [${cat}]`);
       continue;
     }
 
@@ -498,6 +518,8 @@ async function taskFetcher(
   const limit = browserCount * 100;
 
   const proxyPool = getProxyPool();
+  let lastActiveTime = Date.now(); // 마지막으로 태스크를 처리한 시각
+  const IDLE_REFRESH_MS = 30 * 60 * 1000; // 30분 이상 idle 후 태스크 도착 시 리프레시
 
   while (!shouldStop()) {
     // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
@@ -519,6 +541,16 @@ async function taskFetcher(
       clearWaitState();
       continue;
     }
+
+    // 장기 idle 후 태스크 도착 → 브라우저 연결 리프레시 (stale connection 방지)
+    const idleDuration = Date.now() - lastActiveTime;
+    if (idleDuration >= IDLE_REFRESH_MS) {
+      const idleMinutes = Math.round(idleDuration / 60000);
+      console.log(`[TaskFetcher] ${idleMinutes}분 idle 후 태스크 도착 — 브라우저 연결 리프레시`);
+      await changeAllBrowserIPs(holders);
+      console.log(`[TaskFetcher] 브라우저 연결 리프레시 완료`);
+    }
+    lastActiveTime = Date.now();
 
     // 진행 상태 완전 리셋 (큐, 처리중, 완료, 실패 모두 초기화)
     console.log(`[TaskFetcher] Resetting queue stats...`);

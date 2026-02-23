@@ -47,6 +47,10 @@ const CATEGORY_PATTERNS: { category: RestartCategory; patterns: RegExp[] }[] = [
       /browser.*died/i,
       /프로세스 죽음/i,
       /에러 복구/,
+      /Attempted to use/i,
+      /detached Frame/i,
+      /Execution context was destroyed/i,
+      /health check 실패/,
     ],
   },
   {
