@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import { join } from 'path';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import * as db from '../database/sqlite';
 import * as adspower from '../services/adspower';
 import * as api from '../services/api';
@@ -61,22 +61,8 @@ app.whenReady().then(() => {
   const userDataPath = app.getPath('userData');
   db.initDatabase(userDataPath);
 
-  // .env에서 ADSPOWER_API_KEY 로드
-  const envPaths = [
-    join(app.getAppPath(), '.env'),
-    join(process.cwd(), '.env'),
-  ];
-  for (const envPath of envPaths) {
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, 'utf-8');
-      const match = content.match(/^ADSPOWER_API_KEY=(.+)$/m);
-      if (match) {
-        db.setSetting('adspowerApiKey', match[1].trim());
-        console.log('[App] ADSPOWER_API_KEY loaded from', envPath);
-        break;
-      }
-    }
-  }
+  // ADSPOWER_API_KEY 하드코딩
+  db.setSetting('adspowerApiKey', '268820ebcb76ffe2def2d28d04dfd4ae');
 
   // ProxyPool 초기화 (앱 시작 시 'in_use' 상태 정리)
   console.log('[App] Initializing ProxyPool...');

@@ -10,6 +10,7 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^0.563.0",
+        "ms": "^2.1.3",
         "puppeteer-core": "^24.35.0",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",

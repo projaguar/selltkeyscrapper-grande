@@ -1,5 +1,5 @@
 appId: com.adspower.scrapper
-productName: AdsPower Scrapper
+productName: selltkeyscrapper grande
 directories:
   buildResources: build
   output: release
@@ -13,7 +13,7 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: AdsPower Scrapper
+  executableName: selltkeyscrapper grande
   target:
     - target: nsis
       arch:
@@ -31,8 +31,9 @@ mac:
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
     - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
     - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
-  notarize: true
-  gatekeeperAssess: true
+  notarize: false
+  gatekeeperAssess: false
+  identity: null
   hardenedRuntime: true
 dmg:
   artifactName: ${name}-${version}.${ext}
