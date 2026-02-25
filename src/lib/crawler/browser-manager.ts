@@ -232,11 +232,11 @@ class BrowserManager {
 
         console.log(`[BrowserManager] ${profileName} [${groupName}] - ✗ 시도 ${attempt} 실패: ${msg} [${isProxyError ? 'PROXY' : 'CODE'}]`);
 
-        // 프록시 관련 오류만 dead 처리
+        // 프록시 관련 오류 시 active로 복귀 (round-robin 순환으로 자연 쿨다운)
         if (isProxyError) {
           const oldProxyId = browser.getProxyId();
           if (oldProxyId) {
-            proxyPool.markDead(oldProxyId);
+            proxyPool.releaseProxy(oldProxyId, groupId);
           }
         }
 

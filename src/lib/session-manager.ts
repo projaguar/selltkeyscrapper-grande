@@ -172,9 +172,9 @@ export class SessionManager {
 
     const proxyPool = getProxyPool();
 
-    // 기존 Proxy를 dead로 표시
-    proxyPool.markDead(oldSession.proxyId);
-    console.log(`[SessionManager] Marked proxy ${oldSession.proxyId} as dead`);
+    // 기존 Proxy를 active로 복귀 (round-robin 순환으로 자연 쿨다운)
+    proxyPool.releaseProxy(oldSession.proxyId);
+    console.log(`[SessionManager] Released proxy ${oldSession.proxyId} back to active`);
 
     // 새 Proxy 할당
     const newSession = await this.assignProxyToProfile(oldSession.profileId, oldSession.profileName);

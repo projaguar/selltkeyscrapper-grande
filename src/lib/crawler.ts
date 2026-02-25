@@ -380,10 +380,10 @@ async function handleBrowserRestart(
     );
 
     try {
-      // 기존 Proxy를 dead로 표시
+      // 기존 Proxy를 active로 복귀 (round-robin 순환으로 자연 쿨다운)
       const oldProxyId = browser.getProxyId();
       if (oldProxyId) {
-        proxyPool.markDead(oldProxyId);
+        proxyPool.releaseProxy(oldProxyId, groupId);
       }
 
       // 그룹별 새 Proxy 할당
@@ -657,10 +657,10 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
           if (shouldStop()) return;
 
           try {
-            // 기존 Proxy를 dead로 표시
+            // 기존 Proxy를 active로 복귀 (round-robin 순환으로 자연 쿨다운)
             const oldProxyId = browser.getProxyId();
             if (oldProxyId) {
-              proxyPool.markDead(oldProxyId);
+              proxyPool.releaseProxy(oldProxyId, groupId);
             }
 
             // 그룹별 새 Proxy 할당
