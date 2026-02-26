@@ -134,6 +134,16 @@ class AdsPowerQueueManager {
   }
 
   /**
+   * 모든 브라우저 일괄 종료 (V2 API — 단일 요청으로 전체 종료)
+   */
+  async stopAllBrowsers(apiKey: string): Promise<any> {
+    return this.enqueue(
+      'stop-all-browsers',
+      () => adspower.stopAllBrowsers(apiKey),
+    );
+  }
+
+  /**
    * 현재 큐 상태 조회
    */
   getStats() {

@@ -507,26 +507,19 @@ async function handleBrowserRecreation(
  * 1. 브라우저 개수 x 50개 태스크 가져오기
  * 2. 진행 상태 리셋
  * 3. 모든 작업 완료 대기
- * 4. 5분 휴식 + 모든 브라우저 IP 일괄 변경
- * 5. 반복
+ * 4. 3분 휴식 (브라우저 유지, 세션 보호)
+ * 5. 태스크 조회 → 없으면 3분 휴식 반복
+ * 6. 태스크 있으면 → 전체 브라우저 일괄 종료 + 새 프록시 IP 설정 → 5초 후 크롤링 시작
  */
 async function taskFetcher(
   taskQueue: TaskQueueManager,
-  browserManager: ReturnType<typeof getBrowserManager>,
+  _browserManager: ReturnType<typeof getBrowserManager>,
   holders: BrowserHolder[],
 ): Promise<void> {
   const browserCount = holders.length;
-
-  // 개발 환경(bun run dev)이면 10개로 제한, 프로덕션은 브라우저 개수 × 100
-  // const limit = process.env.NODE_ENV === 'development'
-  //   ? 10
-  //   : browserCount * 100;
-
   const limit = browserCount * 100;
-
   const proxyPool = getProxyPool();
-  let lastActiveTime = Date.now(); // 마지막으로 태스크를 처리한 시각
-  const IDLE_REFRESH_MS = 30 * 60 * 1000; // 30분 이상 idle 후 태스크 도착 시 리프레시
+  const REST_DURATION = 3 * 60 * 1000; // 3분 휴식
 
   while (!shouldStop()) {
     // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
@@ -539,25 +532,24 @@ async function taskFetcher(
     const tasks = await fetchTasks(limit);
 
     if (tasks.length === 0) {
-      console.log(`[TaskFetcher] No tasks available, waiting 5 minutes...`);
-      setWaitState(Date.now() + 5 * 60 * 1000, "Task 조회 대기 중...");
-      // 1초 단위로 체크하여 중지 신호에 빠르게 반응
-      for (let i = 0; i < 300 && !shouldStop(); i++) {
+      console.log(`[TaskFetcher] No tasks available, waiting 3 minutes...`);
+      setWaitState(Date.now() + REST_DURATION, "Task 조회 대기 중...");
+      for (let i = 0; i < 180 && !shouldStop(); i++) {
         await delay(1000);
       }
       clearWaitState();
       continue;
     }
 
-    // 장기 idle 후 태스크 도착 → 브라우저 연결 리프레시 (stale connection 방지)
-    const idleDuration = Date.now() - lastActiveTime;
-    if (idleDuration >= IDLE_REFRESH_MS) {
-      const idleMinutes = Math.round(idleDuration / 60000);
-      console.log(`[TaskFetcher] ${idleMinutes}분 idle 후 태스크 도착 — 브라우저 연결 리프레시`);
-      await changeAllBrowserIPs(holders);
-      console.log(`[TaskFetcher] 브라우저 연결 리프레시 완료`);
-    }
-    lastActiveTime = Date.now();
+    // 태스크 도착 → 전체 브라우저 IP 일괄 변경
+    console.log(`[TaskFetcher] ${tasks.length} tasks received. Changing all browser IPs...`);
+    setWaitState(Date.now() + 30 * 1000, "브라우저 IP 일괄 변경 중...");
+    await changeAllBrowserIPs(holders);
+    clearWaitState();
+    console.log(`[TaskFetcher] IP change completed. Starting in 5 seconds...`);
+
+    // 5초 대기 후 크롤링 시작
+    await delay(5000);
 
     // 진행 상태 완전 리셋 (큐, 처리중, 완료, 실패 모두 초기화)
     console.log(`[TaskFetcher] Resetting queue stats...`);
@@ -579,37 +571,15 @@ async function taskFetcher(
       break;
     }
 
-    console.log(
-      `[TaskFetcher] All tasks completed. Starting 5-minute break (including IP change)...`,
-    );
-
-    const breakStartTime = Date.now();
-    const BREAK_DURATION = 5 * 60 * 1000; // 5분
-    setWaitState(breakStartTime + BREAK_DURATION, "IP 변경 및 대기 중...");
-
-    // 모든 브라우저 IP 일괄 변경 (죽은 브라우저도 이 과정에서 복구)
-    console.log(`[TaskFetcher] Changing IPs for all browsers...`);
-    await changeAllBrowserIPs(holders);
-
-    // IP 변경에 걸린 시간을 제외한 나머지 대기
-    const ipChangeElapsed = Date.now() - breakStartTime;
-    const remainingDelay = Math.max(
-      60 * 1000,
-      BREAK_DURATION - ipChangeElapsed,
-    );
-    console.log(
-      `[TaskFetcher] IP change took ${Math.round(ipChangeElapsed / 1000)}s. Remaining delay: ${Math.round(remainingDelay / 1000)}s`,
-    );
-
-    // progress bar를 남은 대기 시간에 맞게 갱신
-    setWaitState(Date.now() + remainingDelay, "다음 작업 대기 중...");
-    const remainingSeconds = Math.ceil(remainingDelay / 1000);
-    for (let i = 0; i < remainingSeconds && !shouldStop(); i++) {
+    // 태스크 완료 → 3분 휴식 (브라우저 유지, 세션 보호)
+    console.log(`[TaskFetcher] All tasks completed. Resting 3 minutes (browsers kept alive)...`);
+    setWaitState(Date.now() + REST_DURATION, "다음 작업 대기 중...");
+    for (let i = 0; i < 180 && !shouldStop(); i++) {
       await delay(1000);
     }
     clearWaitState();
 
-    console.log(`[TaskFetcher] Break finished. Fetching next batch...`);
+    console.log(`[TaskFetcher] Rest finished. Fetching next batch...`);
   }
 }
 
@@ -629,6 +599,28 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
   // worker가 중복 재시작하지 않도록 플래그 설정
   ipChangeInProgress = true;
 
+  // ===== Phase 1: 모든 브라우저 일괄 종료 =====
+  // Puppeteer 연결 즉시 해제 (API 호출 없이)
+  for (const holder of holders) {
+    holder.browser.disconnectOnly();
+  }
+
+  // AdsPower V2 API로 모든 브라우저 한 번에 종료
+  const apiKey = holders[0]?.browser.getApiKey();
+  if (apiKey) {
+    try {
+      const { adsPowerQueue } = await import("./crawler/adspower-queue");
+      await adsPowerQueue.stopAllBrowsers(apiKey);
+      console.log(`[IPChange] All browsers stopped via batch API`);
+    } catch (e: any) {
+      console.log(`[IPChange] Batch stop API failed (개별 진행): ${e.message}`);
+    }
+  }
+
+  // 브라우저들이 완전히 종료될 때까지 잠시 대기
+  await delay(2000);
+
+  // ===== Phase 2: 프록시 변경 + 재시작 =====
   for (
     let batchStart = 0;
     batchStart < holders.length;
@@ -684,10 +676,10 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
               `[IPChange] ${profileName} [${groupName || "default"}] - 프록시 시도 ${attempt}/${maxRetries}: ${newProxy.ip}:${newProxy.port}`,
             );
 
-            // 브라우저 재시작 (새 Proxy로 — 죽은 브라우저도 stop → start로 복구, getNextProxy에서 이미 in_use로 마킹됨)
+            // 프록시 설정 변경 + 브라우저 시작 (이미 종료된 상태이므로 stop 불필요)
             logRestart({ profileName, workerIndex: -1, reason: "IP 일괄 변경", category: "IP_CHANGE" });
             incrementStat("IP_CHANGE");
-            await browser.restart(newProxy);
+            await browser.startWithNewProxy(newProxy);
 
             console.log(
               `[IPChange] ${profileName} [${groupName || "default"}] - ✓ IP change completed: ${newProxy.ip}:${newProxy.port}`,

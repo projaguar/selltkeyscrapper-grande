@@ -75,6 +75,23 @@ export async function stopBrowser(apiKey: string, profileId: string) {
 }
 
 /**
+ * 모든 브라우저 일괄 종료 (V2 API)
+ * 기기에서 활성화된 모든 프로필을 한 번에 종료
+ */
+export async function stopAllBrowsers(apiKey: string) {
+  const url = `${ADSPOWER_API}/api/v2/browser-profile/stop-all`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  return response.json();
+}
+
+/**
  * 브라우저 활성 상태 확인
  */
 export async function checkBrowserStatus(apiKey: string, profileId: string) {

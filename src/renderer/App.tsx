@@ -101,7 +101,7 @@ function App() {
               </div>
             </div>
           )}
-          <div className="text-xs text-gray-500 mt-2">v1.0.0</div>
+          <div className="text-xs text-gray-500 mt-2">v{__APP_VERSION__}</div>
         </div>
       </div>
 

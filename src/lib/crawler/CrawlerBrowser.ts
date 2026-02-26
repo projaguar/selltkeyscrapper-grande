@@ -267,6 +267,23 @@ export class CrawlerBrowser {
   }
 
   /**
+   * Puppeteer 연결만 해제 (AdsPower API 호출 없이)
+   * 일괄 종료 시 사용: API는 별도로 stopAllBrowsers()로 한 번에 처리
+   */
+  disconnectOnly(): void {
+    if (this.browser) {
+      try {
+        this.browser.disconnect();
+      } catch {
+        // 이미 연결이 끊어진 경우 무시
+      }
+      this.browser = undefined;
+    }
+    this.requestInterceptionSetup = false;
+    this.updateStatus("stopped", "중지됨");
+  }
+
+  /**
    * 브라우저 중지 (puppeteer disconnect + AdsPower API stop)
    * @param fireAndForget true면 stop API 응답을 기다리지 않음 (재시작 시 속도 최적화)
    */
@@ -329,6 +346,22 @@ export class CrawlerBrowser {
         await this.updateProxySettings(newProxy);
       }
 
+      await this.start({ validateProxy: false, validateConnection: false });
+    } finally {
+      this.isRestarting = false;
+    }
+  }
+
+  /**
+   * 이미 종료된 상태에서 새 프록시로 시작 (stop 단계 생략)
+   * changeAllBrowserIPs에서 일괄 종료 후 사용
+   */
+  async startWithNewProxy(newProxy: Proxy): Promise<void> {
+    this.isRestarting = true;
+    this.updateStatus("restarting", "프록시 변경 중...");
+
+    try {
+      await this.updateProxySettings(newProxy);
       await this.start({ validateProxy: false, validateConnection: false });
     } finally {
       this.isRestarting = false;
