@@ -524,6 +524,9 @@ async function taskFetcher(
   const proxyPool = getProxyPool();
   const REST_DURATION = 1 * 60 * 1000; // 1분 휴식
 
+  // 최초 시작 시 모든 프록시 활성화 (준비 단계에서 프록시 미할당)
+  proxyPool.resetAllProxies();
+
   while (!shouldStop()) {
     // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
     proxyPool.resetDeadProxies();

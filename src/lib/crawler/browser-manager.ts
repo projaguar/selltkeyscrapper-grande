@@ -47,17 +47,14 @@ class BrowserManager {
   }
 
   /**
-   * 모든 브라우저 준비 (그룹별 프록시 할당 + 테스트)
+   * 모든 브라우저 준비 (그룹 할당 + 브라우저 실행 확인만)
+   * 프록시 IP 할당은 크롤링 시작 시 changeAllBrowserIPs에서 수행
    */
   async prepareBrowsers(
     profiles: Profile[],
     onProgress?: (index: number, total: number, result: PreparationResult) => void
   ): Promise<PreparationResult[]> {
     const results: PreparationResult[] = [];
-    const proxyPool = getProxyPool();
-
-    // 모든 프록시 활성화 (dead/in_use → active, 순환 인덱스 유지)
-    proxyPool.resetAllProxies();
 
     // 기존 브라우저 정리
     await this.clear();
@@ -131,22 +128,18 @@ class BrowserManager {
           proxyGroupName: assignment.groupName,
         });
 
-        // 핑거프린트 안티디텍션 설정 강화 (최초 1회만 실제 업데이트)
-        try {
-          await browser.hardenFingerprint();
-        } catch (e: any) {
-          console.log(`[BrowserManager] ${profile.name} - 핑거프린트 강화 실패 (무시): ${e.message}`);
-        }
+        // 인스턴스 등록 (브라우저 실행은 크롤링 시작 시 changeAllBrowserIPs에서 수행)
+        this.browsers.set(profile.user_id, browser);
 
-        // 프록시 할당 + 브라우저 시작 + 테스트 (최대 10회 재시도)
-        const result = await this.prepareWithRetry(browser, assignment.groupId, assignment.groupName, proxyPool);
-
+        const result: PreparationResult = {
+          success: true,
+          profileId: profile.user_id,
+          profileName: profile.name,
+          proxyGroupName: assignment.groupName,
+        };
         results.push(result);
 
-        // 성공 시 저장
-        if (result.success) {
-          this.browsers.set(profile.user_id, browser);
-        }
+        console.log(`[BrowserManager] ${profile.name} [${assignment.groupName}] - ✓ 등록 완료`);
 
         // 진행 상황 콜백
         if (onProgress) {
@@ -175,101 +168,6 @@ class BrowserManager {
     console.log(`[BrowserManager] Preparation complete: ${successCount}/${profiles.length} browsers ready`);
 
     return results;
-  }
-
-  /**
-   * 프록시 재시도 로직 포함 브라우저 준비
-   */
-  private async prepareWithRetry(
-    browser: CrawlerBrowser,
-    groupId: number,
-    groupName: string,
-    proxyPool: ReturnType<typeof getProxyPool>
-  ): Promise<PreparationResult> {
-    const maxRetries = 10;
-    const profileName = browser.getProfileName();
-    const profileId = browser.getProfileId();
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        // 그룹에서 프록시 가져오기
-        const proxy = proxyPool.getNextProxyByGroup(groupId);
-
-        if (!proxy) {
-          console.log(`[BrowserManager] ${profileName} - No available proxies in group ${groupName}`);
-          return {
-            success: false,
-            profileId,
-            profileName,
-            proxyGroupName: groupName,
-            error: `그룹 "${groupName}"에 사용 가능한 프록시가 없습니다`,
-          };
-        }
-
-        console.log(`[BrowserManager] ${profileName} [${groupName}] - 프록시 시도 ${attempt}/${maxRetries}: ${proxy.ip}:${proxy.port}`);
-
-        // 프록시 설정 업데이트 (getNextProxyByGroup에서 이미 in_use로 마킹됨)
-        await browser.updateProxySettings(proxy);
-
-        // 탭 설정 초기화
-        await browser.clearTabSettings();
-
-        // 브라우저 시작 (프록시 검증은 크롤링 시작 시 수행)
-        await browser.start({ validateProxy: false, validateConnection: false });
-
-        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✓ 준비 완료: ${proxy.ip}:${proxy.port}`);
-
-        return {
-          success: true,
-          profileId,
-          profileName,
-          proxyGroupName: groupName,
-          proxyIp: `${proxy.ip}:${proxy.port}`,
-        };
-      } catch (error: any) {
-        const msg = error.message || '';
-        const isProxyError = this.isProxyRelatedError(msg);
-
-        console.log(`[BrowserManager] ${profileName} [${groupName}] - ✗ 시도 ${attempt} 실패: ${msg} [${isProxyError ? 'PROXY' : 'CODE'}]`);
-
-        // 프록시 관련 오류 시 active로 복귀 (round-robin 순환으로 자연 쿨다운)
-        if (isProxyError) {
-          const oldProxyId = browser.getProxyId();
-          if (oldProxyId) {
-            proxyPool.releaseProxy(oldProxyId, groupId);
-          }
-        }
-
-        // 브라우저 종료
-        try {
-          await browser.stop();
-        } catch {
-          // 무시
-        }
-
-        // 코드/API 오류는 프록시 변경 없이 재시도 무의미 → 즉시 실패
-        if (!isProxyError) {
-          return {
-            success: false,
-            profileId,
-            profileName,
-            proxyGroupName: groupName,
-            error: msg,
-          };
-        }
-
-        // 재시작 전 잠시 대기 (1.5초)
-        await this.delay(1500);
-      }
-    }
-
-    return {
-      success: false,
-      profileId,
-      profileName,
-      proxyGroupName: groupName,
-      error: `${maxRetries}개 프록시 모두 실패`,
-    };
   }
 
   /**
@@ -421,32 +319,6 @@ class BrowserManager {
     }
 
     return newBrowser;
-  }
-
-  /**
-   * 프록시 관련 오류인지 판별
-   * - 프록시 오류: 연결 실패, 타임아웃, 인증 실패, IP 검증 실패 등
-   * - 코드/API 오류: SDK 오류, 함수 없음, 프로필 미존재 등
-   */
-  private isProxyRelatedError(message: string): boolean {
-    const proxyPatterns = [
-      /proxy/i,
-      /ECONNREFUSED/i,
-      /ECONNRESET/i,
-      /ETIMEDOUT/i,
-      /ENOTFOUND/i,
-      /tunnel/i,
-      /socket hang up/i,
-      /connection.*(?:refused|reset|timeout|failed)/i,
-      /net::ERR_/i,
-      /Failed to retrieve IP/i,
-      /Proxy validation/i,
-      /Request timeout/i,
-      /timeout after/i,
-      /407/,  // Proxy Authentication Required
-    ];
-
-    return proxyPatterns.some(p => p.test(message));
   }
 
   private delay(ms: number): Promise<void> {
