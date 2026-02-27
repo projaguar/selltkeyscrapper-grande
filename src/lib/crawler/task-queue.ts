@@ -7,6 +7,7 @@
  */
 
 import type { CrawlTask, CrawlResult } from "./types";
+import { isUserBlocked } from "./state";
 
 interface TaskQueueStats {
   queueSize: number;
@@ -24,13 +25,24 @@ export class TaskQueueManager {
   /**
    * Queue에서 다음 Task 가져오기 (Worker용)
    */
-  getNext(): CrawlTask | null {
-    const task = this.queue.shift();
+  getNext(): { task: CrawlTask | null; skippedByTodayStop: number } {
+    // todayStop된 USERNUM의 태스크는 스킵
+    let skippedByTodayStop = 0;
+    while (this.queue.length > 0 && isUserBlocked(this.queue[0].USERNUM)) {
+      const skipped = this.queue.shift()!;
+      console.log(`[TaskQueue] Task ${skipped.URLNUM} (${skipped.TARGETSTORENAME}) skipped (todayStop USERNUM: ${skipped.USERNUM})`);
+      skippedByTodayStop++;
+    }
+    if (skippedByTodayStop > 0) {
+      console.log(`[TaskQueue] Skipped ${skippedByTodayStop} tasks due to todayStop`);
+    }
+
+    const task = this.queue.shift() || null;
     if (task) {
       this.processing.set(task.URLNUM, task);
       console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) assigned`);
     }
-    return task || null;
+    return { task, skippedByTodayStop };
   }
 
   /**

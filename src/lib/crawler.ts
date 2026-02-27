@@ -205,8 +205,11 @@ async function browserWorker(
       continue;
     }
 
-    // Queue에서 Task 가져오기
-    const task = taskQueue.getNext();
+    // Queue에서 Task 가져오기 (todayStop된 USERNUM 자동 스킵)
+    const { task, skippedByTodayStop } = taskQueue.getNext();
+    if (skippedByTodayStop > 0) {
+      incrementSkipped(skippedByTodayStop);
+    }
 
     // Task 없으면 짧게 대기 후 재시도 (중지 신호 빠르게 반응)
     if (!task) {
@@ -507,8 +510,8 @@ async function handleBrowserRecreation(
  * 1. 브라우저 개수 x 50개 태스크 가져오기
  * 2. 진행 상태 리셋
  * 3. 모든 작업 완료 대기
- * 4. 3분 휴식 (브라우저 유지, 세션 보호)
- * 5. 태스크 조회 → 없으면 3분 휴식 반복
+ * 4. 1분 휴식 (브라우저 유지, 세션 보호)
+ * 5. 태스크 조회 → 없으면 1분 휴식 반복
  * 6. 태스크 있으면 → 전체 브라우저 일괄 종료 + 새 프록시 IP 설정 → 5초 후 크롤링 시작
  */
 async function taskFetcher(
@@ -519,7 +522,7 @@ async function taskFetcher(
   const browserCount = holders.length;
   const limit = browserCount * 100;
   const proxyPool = getProxyPool();
-  const REST_DURATION = 3 * 60 * 1000; // 3분 휴식
+  const REST_DURATION = 1 * 60 * 1000; // 1분 휴식
 
   while (!shouldStop()) {
     // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
@@ -532,9 +535,9 @@ async function taskFetcher(
     const tasks = await fetchTasks(limit);
 
     if (tasks.length === 0) {
-      console.log(`[TaskFetcher] No tasks available, waiting 3 minutes...`);
+      console.log(`[TaskFetcher] No tasks available, waiting 1 minute...`);
       setWaitState(Date.now() + REST_DURATION, "Task 조회 대기 중...");
-      for (let i = 0; i < 180 && !shouldStop(); i++) {
+      for (let i = 0; i < 60 && !shouldStop(); i++) {
         await delay(1000);
       }
       clearWaitState();
@@ -571,10 +574,10 @@ async function taskFetcher(
       break;
     }
 
-    // 태스크 완료 → 3분 휴식 (브라우저 유지, 세션 보호)
-    console.log(`[TaskFetcher] All tasks completed. Resting 3 minutes (browsers kept alive)...`);
+    // 태스크 완료 → 1분 휴식 (브라우저 유지, 세션 보호)
+    console.log(`[TaskFetcher] All tasks completed. Resting 1 minute (browsers kept alive)...`);
     setWaitState(Date.now() + REST_DURATION, "다음 작업 대기 중...");
-    for (let i = 0; i < 180 && !shouldStop(); i++) {
+    for (let i = 0; i < 60 && !shouldStop(); i++) {
       await delay(1000);
     }
     clearWaitState();
