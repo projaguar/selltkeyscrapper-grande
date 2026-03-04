@@ -136,7 +136,7 @@ export async function crawlNaver(
   if (!data) {
     result.data!.errorMsg = "데이터 로드 실패";
   } else if (
-    (data.channel && data.channel?.channelServiceType !== "NORMAL") ||
+    (data.channel && data.channel?.channelExternalStatusType !== "NORMAL") ||
     !data.categoryTree?.A ||
     Object.keys(data.categoryTree?.A).length === 0
   ) {
