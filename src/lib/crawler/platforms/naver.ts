@@ -13,7 +13,7 @@ export async function detectNaverCaptcha(page: any): Promise<boolean> {
   try {
     const pageInfo = await page.evaluate(() => {
       const captchaScript = document.querySelector(
-        'script[src*="wtm_captcha.js"]'
+        'script[src*="wtm_captcha.js"]',
       );
       const captchaFrame = document.querySelector('iframe[src*="captcha"]');
       const captchaContainer = document.querySelector(".captcha_container");
@@ -81,11 +81,11 @@ function collectNaverProducts(data: any, targetList: number[]): any[] {
       combinedFound
         .filter((item: any) => item && item.id)
         .reduce((map: any, item: any) => map.set(item.id, item), new Map())
-        .values()
+        .values(),
     );
 
     console.log(
-      `[Naver] Collected ${uniqueById.length} products (target: ${targetList.length})`
+      `[Naver] Collected ${uniqueById.length} products (target: ${targetList.length})`,
     );
 
     return uniqueById;
@@ -101,7 +101,7 @@ function collectNaverProducts(data: any, targetList: number[]): any[] {
 export async function crawlNaver(
   page: any,
   task: CrawlTask,
-  profileName: string
+  profileName: string,
 ): Promise<CrawlResult> {
   // CAPTCHA 체크
   if (await detectNaverCaptcha(page)) {
@@ -142,12 +142,17 @@ export async function crawlNaver(
     result.data!.errorMsg = "운영중이 아님";
   } else {
     // 베스트/신상품 필터링
-    const bestList =
-      data.smartStoreV2?.specialProducts?.bestProductNos ?? [];
+    const bestList = data.smartStoreV2?.specialProducts?.bestProductNos ?? [];
     const newList = data.smartStoreV2?.specialProducts?.newProductNos ?? [];
+    const best2List =
+      data.productCollection.specialProducts.bestProductNos ?? [];
+    const new2List = data.productCollection.specialProducts.newProductNos ?? [];
+
     const targetList = [
-      ...(task.BESTYN === "Y" ? bestList : []),
+      ...(bestList || []),
       ...(task.NEWYN === "Y" ? newList : []),
+      ...(best2List || []),
+      ...(task.NEWYN === "Y" ? new2List : []),
     ];
 
     if (targetList.length === 0) {
@@ -165,12 +170,12 @@ export async function crawlNaver(
         // 가격 필터링
         const priceFiltered = combinedFound.filter(
           (item: any) =>
-            item.salePrice >= spricelimit && item.salePrice <= epricelimit
+            item.salePrice >= spricelimit && item.salePrice <= epricelimit,
         );
 
         // 이름 필터링
         const nameFiltered = priceFiltered.filter((item: any) =>
-          Boolean(item.name)
+          Boolean(item.name),
         );
 
         if (nameFiltered.length === 0) {
@@ -189,7 +194,7 @@ export async function crawlNaver(
             deliveryfee: item.productDeliveryInfo?.baseFee ?? 0,
             nvcate: item.category?.categoryId || "",
             imageurl: item.representativeImageUrl || "",
-            goodsurl: `https://smartstore.naver.com/${data.smartStoreV2?.channel?.url || "unknown"}/products/${item.id}`,
+            goodsurl: `https://smartstore.naver.com/${data.smartStoreV2?.channel?.url || data.channel.url || "unknown"}/products/${item.id}`,
             seoinfo: data.seoInfo?.sellerTags ?? "",
           }));
         }
@@ -216,9 +221,13 @@ export async function crawlNaver(
   // 서버 전송 결과 출력
   const statusIcon = result.success ? "✓" : "✗";
   const productCount = result.data!.list.length;
-  const transmitStatus = postResult.success ? (postResult.todayStop ? "중단" : "완료") : "실패";
+  const transmitStatus = postResult.success
+    ? postResult.todayStop
+      ? "중단"
+      : "완료"
+    : "실패";
   console.log(
-    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${transmitStatus}`
+    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${transmitStatus}`,
   );
 
   return result;
