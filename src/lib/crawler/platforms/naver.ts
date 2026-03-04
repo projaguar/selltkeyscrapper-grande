@@ -136,9 +136,9 @@ export async function crawlNaver(
   if (!data) {
     result.data!.errorMsg = "데이터 로드 실패";
   } else if (
-    (data.channel && data.channel?.channelServiceType !== "NORMAL") ||
-    !data.categoryTree?.A ||
-    Object.keys(data.categoryTree?.A).length === 0
+    (data.channel && data.channel?.channelExternalStatusType !== "NORMAL") ||
+    (data.categoryTree && (!data.categoryTree?.A ||
+    Object.keys(data.categoryTree?.A).length === 0))
   ) {
     result.data!.errorMsg = "운영중이 아님";
   } else {
