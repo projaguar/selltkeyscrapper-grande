@@ -69,6 +69,19 @@ function collectNaverProducts(data: any, targetList: number[]): any[] {
       wholeProduct:
         widgetContents?.wholeProductWidget?.A?.data?.simpleProducts || [],
       category: category?.A?.simpleProducts || [],
+
+      // 추가
+      REALTIME_NEW:
+        data.bestProducts?.A?.bestProducts?.REALTIME?.simpleProducts || [],
+
+      DAILY_NEW:
+        data.bestProducts?.A?.bestProducts?.DAILY?.simpleProducts || [],
+
+      WEEKLY_NEW:
+        data.bestProducts?.A?.bestProducts?.WEEKLY?.simpleProducts || [],
+
+      MONTHLY_NEW:
+        data.bestProducts?.A?.bestProducts?.MONTHLY?.simpleProducts || [],
     };
 
     // 각 소스에서 매칭되는 상품 찾기
@@ -137,8 +150,8 @@ export async function crawlNaver(
     result.data!.errorMsg = "데이터 로드 실패";
   } else if (
     (data.channel && data.channel?.channelExternalStatusType !== "NORMAL") ||
-    (data.categoryTree && (!data.categoryTree?.A ||
-    Object.keys(data.categoryTree?.A).length === 0))
+    (data.categoryTree &&
+      (!data.categoryTree?.A || Object.keys(data.categoryTree?.A).length === 0))
   ) {
     result.data!.errorMsg = "운영중이 아님";
   } else {

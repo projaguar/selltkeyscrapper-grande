@@ -1,0 +1,214 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1772787013261,
+  "projectRoot": "/Users/projaguar/projects/scrapper",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "react",
+        "version": "19.2.0",
+        "category": "frontend"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.2.0",
+        "category": "frontend"
+      },
+      {
+        "name": "vite",
+        "version": "7.2.4",
+        "category": "build"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": "npm run lint",
+    "devCommand": "npm run dev",
+    "scripts": {
+      "start": "electron-vite preview",
+      "dev": "electron-vite dev",
+      "build": "electron-vite build",
+      "postinstall": "patch-package && electron-builder install-app-deps",
+      "build:unpack": "bun run build && electron-builder --dir",
+      "build:win": "bun run build && electron-builder --win --x64",
+      "build:mac": "bun run build && electron-builder --mac",
+      "build:macCertification": "set -a && source .env && set +a && electron-vite build && electron-builder --mac",
+      "build:linux": "bun run build && electron-builder --linux",
+      "type-check": "tsc -b",
+      "lint": "eslint .",
+      "proxy:import": "tsx scripts/import-proxies.ts",
+      "proxy:delete": "tsx scripts/delete-all-proxies.ts",
+      "proxy:refresh": "bun run proxy:delete && bun run proxy:import"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "public",
+      "scripts",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "_resource": {
+      "path": "_resource",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1772787013192,
+      "keyFiles": [
+        "adspower 계정.md",
+        "tasks.txt",
+        "workflow.txt",
+        "프록시유동_모모아이피.txt",
+        "비싼아이피.txt"
+      ]
+    },
+    "build": {
+      "path": "build",
+      "purpose": "Build output",
+      "fileCount": 1,
+      "lastAccessed": 1772787013192,
+      "keyFiles": [
+        "entitlements.mac.plist"
+      ]
+    },
+    "crawl-results": {
+      "path": "crawl-results",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1772787013212,
+      "keyFiles": [
+        "combined_contacts.csv",
+        "filtered.csv",
+        "names.txt"
+      ]
+    },
+    "out": {
+      "path": "out",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1772787013213,
+      "keyFiles": []
+    },
+    "patches": {
+      "path": "patches",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1772787013216,
+      "keyFiles": []
+    },
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1772787013218,
+      "keyFiles": [
+        "vite.svg"
+      ]
+    },
+    "release": {
+      "path": "release",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1772787013218,
+      "keyFiles": [
+        "AdsPower Scrapper-1.0.0-arm64-mac.zip",
+        "AdsPower Scrapper-1.0.0-arm64-mac.zip.blockmap",
+        "builder-debug.yml",
+        "builder-effective-config.yaml",
+        "latest-mac.yml"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 3,
+      "lastAccessed": 1772787013219,
+      "keyFiles": [
+        "README.md",
+        "delete-all-proxies.ts",
+        "import-proxies.ts"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1772787013220,
+      "keyFiles": [
+        "index.css",
+        "store.ts"
+      ]
+    },
+    "src/assets": {
+      "path": "src/assets",
+      "purpose": "Static assets",
+      "fileCount": 1,
+      "lastAccessed": 1772787013252,
+      "keyFiles": [
+        "react.svg"
+      ]
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 0,
+      "lastAccessed": 1772787013258,
+      "keyFiles": []
+    },
+    "src/lib": {
+      "path": "src/lib",
+      "purpose": "Library code",
+      "fileCount": 4,
+      "lastAccessed": 1772787013260,
+      "keyFiles": [
+        "crawler.ts",
+        "proxy-pool.ts",
+        "session-manager.ts"
+      ]
+    },
+    "src/services": {
+      "path": "src/services",
+      "purpose": "Business logic services",
+      "fileCount": 2,
+      "lastAccessed": 1772787013261,
+      "keyFiles": [
+        "adspower.ts",
+        "api.ts"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}
