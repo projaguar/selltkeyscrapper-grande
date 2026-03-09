@@ -5,6 +5,7 @@
 import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
 import { logBlocked } from "../restart-logger";
+import { extractNaverProductNos, collectNaverProducts, mapNaverProduct } from "@open-nest/utils-selltkey";
 
 /**
  * CAPTCHA 감지
@@ -36,75 +37,6 @@ export async function detectNaverCaptcha(page: any): Promise<boolean> {
   } catch (error) {
     console.log(`[Naver] CAPTCHA check error:`, error);
     return false;
-  }
-}
-
-/**
- * 네이버 상품 데이터 수집
- */
-function collectNaverProducts(data: any, targetList: number[]): any[] {
-  try {
-    const targetSet = new Set(targetList);
-    const widgetContents = data?.widgetContents || {};
-    const category = data?.category || {};
-
-    const sources = {
-      REALTIME:
-        widgetContents.bestProductWidget?.A?.data?.bestProducts?.REALTIME
-          ?.simpleProducts || [],
-      DAILY:
-        widgetContents.bestProductWidget?.A?.data?.bestProducts?.DAILY
-          ?.simpleProducts || [],
-      WEEKLY:
-        widgetContents.bestProductWidget?.A?.data?.bestProducts?.WEEKLY
-          ?.simpleProducts || [],
-      MONTHLY:
-        widgetContents.bestProductWidget?.A?.data?.bestProducts?.MONTHLY
-          ?.simpleProducts || [],
-      allCategory:
-        widgetContents?.bestProductWidget?.A?.data?.allCategoryProducts
-          ?.simpleProducts || [],
-      bestReview:
-        widgetContents?.bestReviewWidget?.A?.data?.reviewProducts || [],
-      wholeProduct:
-        widgetContents?.wholeProductWidget?.A?.data?.simpleProducts || [],
-      category: category?.A?.simpleProducts || [],
-
-      // 추가
-      REALTIME_NEW:
-        data.bestProducts?.A?.bestProducts?.REALTIME?.simpleProducts || [],
-
-      DAILY_NEW:
-        data.bestProducts?.A?.bestProducts?.DAILY?.simpleProducts || [],
-
-      WEEKLY_NEW:
-        data.bestProducts?.A?.bestProducts?.WEEKLY?.simpleProducts || [],
-
-      MONTHLY_NEW:
-        data.bestProducts?.A?.bestProducts?.MONTHLY?.simpleProducts || [],
-    };
-
-    // 각 소스에서 매칭되는 상품 찾기
-    const combinedFound = Object.values(sources)
-      .flat()
-      .filter((item: any) => targetSet.has(item.id));
-
-    // 중복 제거
-    const uniqueById = Array.from(
-      combinedFound
-        .filter((item: any) => item && item.id)
-        .reduce((map: any, item: any) => map.set(item.id, item), new Map())
-        .values(),
-    );
-
-    console.log(
-      `[Naver] Collected ${uniqueById.length} products (target: ${targetList.length})`,
-    );
-
-    return uniqueById;
-  } catch (error) {
-    console.error("[Naver] Product collection error:", error);
-    return [];
   }
 }
 
@@ -156,18 +88,7 @@ export async function crawlNaver(
     result.data!.errorMsg = "운영중이 아님";
   } else {
     // 베스트/신상품 필터링
-    const bestList = data.smartStoreV2?.specialProducts?.bestProductNos ?? [];
-    const newList = data.smartStoreV2?.specialProducts?.newProductNos ?? [];
-    const best2List =
-      data.productCollection.specialProducts.bestProductNos ?? [];
-    const new2List = data.productCollection.specialProducts.newProductNos ?? [];
-
-    const targetList = [
-      ...(bestList || []),
-      ...(task.NEWYN === "Y" ? newList : []),
-      ...(best2List || []),
-      ...(task.NEWYN === "Y" ? new2List : []),
-    ];
+    const targetList = extractNaverProductNos(data, task.NEWYN);
 
     if (targetList.length === 0) {
       result.data!.errorMsg = "베스트 상품이 없음";
@@ -198,19 +119,7 @@ export async function crawlNaver(
           result.success = true;
           result.data!.error = false;
           result.data!.errorMsg = "수집성공";
-          result.data!.list = nameFiltered.map((item: any) => ({
-            goodscode: item.id,
-            goodsname: item.name,
-            saleprice: item.salePrice,
-            discountsaleprice:
-              item.benefitsView?.discountedSalePrice || item.salePrice,
-            discountrate: item.benefitsView?.discountedRatio || 0,
-            deliveryfee: item.productDeliveryInfo?.baseFee ?? 0,
-            nvcate: item.category?.categoryId || "",
-            imageurl: item.representativeImageUrl || "",
-            goodsurl: `https://smartstore.naver.com/${data.smartStoreV2?.channel?.url || data.channel.url || "unknown"}/products/${item.id}`,
-            seoinfo: data.seoInfo?.sellerTags ?? "",
-          }));
+          result.data!.list = nameFiltered.map((item: any) => mapNaverProduct(item, data));
         }
       }
     }
