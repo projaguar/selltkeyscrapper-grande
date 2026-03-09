@@ -247,8 +247,7 @@ async function browserWorker(
       // 성공 → dead error 카운터 리셋
       consecutiveDeadErrors = 0;
 
-      // 결과 분류 및 상태 업데이트
-      const collectedCount = result.data?.list?.length || 0;
+      const collectedCount = result.urlcount || 0;
       const { status, message } = classifyResult(result, collectedCount);
 
       browser.completeCrawling(

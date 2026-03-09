@@ -30,6 +30,7 @@ export interface CrawlResult {
   todayStop?: boolean;
   data?: CrawlData;
   serverTransmitted?: boolean; // 서버에 데이터가 전송되었는지 여부
+  urlcount?: number; // 서버에서 파싱 후 반환한 수집 갯수
 }
 
 export interface CrawlData {

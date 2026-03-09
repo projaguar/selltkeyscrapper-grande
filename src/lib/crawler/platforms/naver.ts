@@ -115,8 +115,8 @@ export async function crawlNaver(
   const postResult = await postGoodsList(postData, task.URLPLATFORMS);
   result.todayStop = postResult.todayStop;
   result.serverTransmitted = postResult.success;
+  result.urlcount = postResult.urlcount;
 
-  // 서버 전송 결과 출력
   const statusIcon = result.success ? "✓" : "✗";
   const transmitStatus = postResult.success
     ? postResult.todayStop
@@ -124,7 +124,7 @@ export async function crawlNaver(
       : "완료"
     : "실패";
   console.log(
-    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg || "raw data 전송"} | Naver 서버전송: ${transmitStatus}`,
+    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg || `${postResult.urlcount}개 수집`} | Naver 서버전송: ${transmitStatus}`,
   );
 
   return result;

@@ -123,13 +123,13 @@ export function handleTodayStopResults(
  * 크롤링 결과를 relay API로 gzip 압축 전송
  * @returns {success: 전송 성공 여부, todayStop: 오늘 중단 여부}
  */
-export async function postGoodsList(payload: any, platform: string): Promise<{success: boolean, todayStop: boolean}> {
+export async function postGoodsList(payload: any, platform: string): Promise<{success: boolean, todayStop: boolean, urlcount: number}> {
   try {
     const insertUrl = getInsertUrl();
 
     if (!insertUrl) {
       console.warn('[TaskManager] insertUrl not set, skipping post');
-      return {success: false, todayStop: false};
+      return {success: false, todayStop: false, urlcount: 0};
     }
 
     // insertUrl을 context에 추가
@@ -154,9 +154,9 @@ export async function postGoodsList(payload: any, platform: string): Promise<{su
     }
 
     const result = await response.json();
-    return {success: true, todayStop: result.todayStop || false};
+    return {success: true, todayStop: result.todayStop || false, urlcount: result.urlcount || 0};
   } catch (error: any) {
     console.error(`[TaskManager] 서버 전송 실패: ${error.message}`);
-    return {success: false, todayStop: false};
+    return {success: false, todayStop: false, urlcount: 0};
   }
 }
