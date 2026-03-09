@@ -5,7 +5,6 @@
 import type { CrawlTask, CrawlResult } from "../types";
 import { postGoodsList } from "../task-manager";
 import { logBlocked } from "../restart-logger";
-import { extractNaverProductNos, collectNaverProducts, mapNaverProduct } from "@open-nest/utils-selltkey";
 
 /**
  * CAPTCHA 감지
@@ -77,80 +76,55 @@ export async function crawlNaver(
     },
   };
 
-  // 데이터 유효성 검사
+  // 서버에 데이터 전송
+  let postData: any;
   if (!data) {
     result.data!.errorMsg = "데이터 로드 실패";
-  } else if (
-    (data.channel && data.channel?.channelExternalStatusType !== "NORMAL") ||
-    (data.categoryTree &&
-      (!data.categoryTree?.A || Object.keys(data.categoryTree?.A).length === 0))
-  ) {
-    result.data!.errorMsg = "운영중이 아님";
+    // 에러 결과는 isParsed: true로 전송
+    postData = {
+      data: {
+        urlnum: task.URLNUM,
+        usernum: task.USERNUM,
+        spricelimit: task.SPRICELIMIT,
+        epricelimit: task.EPRICELIMIT,
+        platforms: task.URLPLATFORMS,
+        bestyn: task.BESTYN,
+        newyn: task.NEWYN,
+        result: result.data,
+      },
+      context: { isParsed: true },
+    };
   } else {
-    // 베스트/신상품 필터링
-    const targetList = extractNaverProductNos(data, task.NEWYN);
-
-    if (targetList.length === 0) {
-      result.data!.errorMsg = "베스트 상품이 없음";
-    } else {
-      // 상품 데이터 수집 및 필터링
-      const combinedFound = collectNaverProducts(data, targetList);
-
-      if (combinedFound.length === 0) {
-        result.data!.errorMsg = "수집된 상품 데이터 없음";
-      } else {
-        const spricelimit: number = +task.SPRICELIMIT;
-        const epricelimit: number = +task.EPRICELIMIT;
-
-        // 가격 필터링
-        const priceFiltered = combinedFound.filter(
-          (item: any) =>
-            item.salePrice >= spricelimit && item.salePrice <= epricelimit,
-        );
-
-        // 이름 필터링
-        const nameFiltered = priceFiltered.filter((item: any) =>
-          Boolean(item.name),
-        );
-
-        if (nameFiltered.length === 0) {
-          result.data!.errorMsg = "가격/이름 필터링 후 상품 없음";
-        } else {
-          result.success = true;
-          result.data!.error = false;
-          result.data!.errorMsg = "수집성공";
-          result.data!.list = nameFiltered.map((item: any) => mapNaverProduct(item, data));
-        }
-      }
-    }
+    // raw data를 서버로 전송 (서버에서 파싱)
+    result.success = true;
+    postData = {
+      data: data,
+      context: {
+        isParsed: false,
+        urlnum: task.URLNUM,
+        usernum: task.USERNUM,
+        spricelimit: task.SPRICELIMIT,
+        epricelimit: task.EPRICELIMIT,
+        platforms: task.URLPLATFORMS,
+        bestyn: task.BESTYN,
+        newyn: task.NEWYN,
+      },
+    };
   }
 
-  // 서버에 데이터 전송
-  const postData = {
-    urlnum: task.URLNUM,
-    usernum: task.USERNUM,
-    spricelimit: task.SPRICELIMIT,
-    epricelimit: task.EPRICELIMIT,
-    platforms: task.URLPLATFORMS,
-    bestyn: task.BESTYN,
-    newyn: task.NEWYN,
-    result: result.data || { error: true, errorMsg: "", list: [] },
-  };
-
-  const postResult = await postGoodsList(postData);
+  const postResult = await postGoodsList(postData, task.URLPLATFORMS);
   result.todayStop = postResult.todayStop;
   result.serverTransmitted = postResult.success;
 
   // 서버 전송 결과 출력
   const statusIcon = result.success ? "✓" : "✗";
-  const productCount = result.data!.list.length;
   const transmitStatus = postResult.success
     ? postResult.todayStop
       ? "중단"
       : "완료"
     : "실패";
   console.log(
-    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Naver 서버전송: ${transmitStatus}`,
+    `[Naver] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg || "raw data 전송"} | Naver 서버전송: ${transmitStatus}`,
   );
 
   return result;

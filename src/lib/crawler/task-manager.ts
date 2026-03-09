@@ -5,6 +5,7 @@
  * - 완료/실패 Task 처리
  */
 
+import { gzipSync } from "node:zlib";
 import type { CrawlTask, CrawlResult } from "./types";
 import {
   getTaskQueue,
@@ -119,12 +120,11 @@ export function handleTodayStopResults(
 }
 
 /**
- * 크롤링 결과를 서버에 전송
+ * 크롤링 결과를 relay API로 gzip 압축 전송
  * @returns {success: 전송 성공 여부, todayStop: 오늘 중단 여부}
  */
-export async function postGoodsList(data: any): Promise<{success: boolean, todayStop: boolean}> {
+export async function postGoodsList(payload: any, platform: string): Promise<{success: boolean, todayStop: boolean}> {
   try {
-    // 최신 insertUrl 가져오기
     const insertUrl = getInsertUrl();
 
     if (!insertUrl) {
@@ -132,10 +132,21 @@ export async function postGoodsList(data: any): Promise<{success: boolean, today
       return {success: false, todayStop: false};
     }
 
-    const response = await fetch(insertUrl, {
+    // insertUrl을 context에 추가
+    if (payload.context && !payload.context.inserturl) {
+      payload.context.inserturl = insertUrl;
+    }
+
+    const url = `https://api.opennest.co.kr/selltkey/v1/product-collect/relay-${platform.toLowerCase()}-goods`;
+    const compressed = gzipSync(Buffer.from(JSON.stringify(payload)));
+
+    const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+      },
+      body: compressed,
     });
 
     if (!response.ok) {

@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1772787013261,
+  "lastScanned": 1773044592464,
   "projectRoot": "/Users/projaguar/projects/scrapper",
   "techStack": {
     "languages": [
@@ -85,7 +85,7 @@
       "path": "_resource",
       "purpose": null,
       "fileCount": 6,
-      "lastAccessed": 1772787013192,
+      "lastAccessed": 1773044592374,
       "keyFiles": [
         "adspower 계정.md",
         "tasks.txt",
@@ -98,7 +98,7 @@
       "path": "build",
       "purpose": "Build output",
       "fileCount": 1,
-      "lastAccessed": 1772787013192,
+      "lastAccessed": 1773044592375,
       "keyFiles": [
         "entitlements.mac.plist"
       ]
@@ -107,7 +107,7 @@
       "path": "crawl-results",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1772787013212,
+      "lastAccessed": 1773044592456,
       "keyFiles": [
         "combined_contacts.csv",
         "filtered.csv",
@@ -118,21 +118,21 @@
       "path": "out",
       "purpose": "Build output",
       "fileCount": 0,
-      "lastAccessed": 1772787013213,
+      "lastAccessed": 1773044592459,
       "keyFiles": []
     },
     "patches": {
       "path": "patches",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1772787013216,
+      "lastAccessed": 1773044592460,
       "keyFiles": []
     },
     "public": {
       "path": "public",
       "purpose": "Public files",
       "fileCount": 1,
-      "lastAccessed": 1772787013218,
+      "lastAccessed": 1773044592460,
       "keyFiles": [
         "vite.svg"
       ]
@@ -141,7 +141,7 @@
       "path": "release",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1772787013218,
+      "lastAccessed": 1773044592461,
       "keyFiles": [
         "AdsPower Scrapper-1.0.0-arm64-mac.zip",
         "AdsPower Scrapper-1.0.0-arm64-mac.zip.blockmap",
@@ -154,7 +154,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 3,
-      "lastAccessed": 1772787013219,
+      "lastAccessed": 1773044592461,
       "keyFiles": [
         "README.md",
         "delete-all-proxies.ts",
@@ -165,7 +165,7 @@
       "path": "src",
       "purpose": "Source code",
       "fileCount": 2,
-      "lastAccessed": 1772787013220,
+      "lastAccessed": 1773044592461,
       "keyFiles": [
         "index.css",
         "store.ts"
@@ -175,7 +175,7 @@
       "path": "src/assets",
       "purpose": "Static assets",
       "fileCount": 1,
-      "lastAccessed": 1772787013252,
+      "lastAccessed": 1773044592463,
       "keyFiles": [
         "react.svg"
       ]
@@ -184,14 +184,14 @@
       "path": "src/components",
       "purpose": "UI components",
       "fileCount": 0,
-      "lastAccessed": 1772787013258,
+      "lastAccessed": 1773044592464,
       "keyFiles": []
     },
     "src/lib": {
       "path": "src/lib",
       "purpose": "Library code",
       "fileCount": 4,
-      "lastAccessed": 1772787013260,
+      "lastAccessed": 1773044592464,
       "keyFiles": [
         "crawler.ts",
         "proxy-pool.ts",
@@ -202,7 +202,7 @@
       "path": "src/services",
       "purpose": "Business logic services",
       "fileCount": 2,
-      "lastAccessed": 1772787013261,
+      "lastAccessed": 1773044592464,
       "keyFiles": [
         "adspower.ts",
         "api.ts"

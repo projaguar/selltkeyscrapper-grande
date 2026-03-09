@@ -21,7 +21,6 @@
     "proxy:refresh": "bun run proxy:delete && bun run proxy:import"
   },
   "dependencies": {
-    "@open-nest/utils-selltkey": "file:./open-nest-libs/packages/utils-selltkey",
     "@radix-ui/react-slot": "^1.2.4",
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",

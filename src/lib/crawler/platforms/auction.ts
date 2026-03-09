@@ -13,7 +13,7 @@ export async function detectCloudflareBlock(page: any): Promise<boolean> {
   try {
     const pageInfo = await page.evaluate(() => {
       const bodyText = document.body?.textContent || "";
-      const hasCloudflareScript = !!window._cf_chl_opt;
+      const hasCloudflareScript = !!(window as any)._cf_chl_opt;
 
       return {
         hasBlockText: bodyText.includes("사용자 활동 검토 요청") ||
@@ -71,104 +71,8 @@ export async function detectAuctionCaptcha(page: any): Promise<boolean> {
 }
 
 /**
- * 옥션 상품 데이터 수집
- */
-function collectAuctionProducts(modules: any[]): any[] {
-  const collectedProducts: any[] = [];
-
-  for (const module of modules) {
-    if (!module.rows || !Array.isArray(module.rows)) {
-      continue;
-    }
-
-    for (const row of module.rows) {
-      if (row.designName !== "ItemCardGeneral") {
-        continue;
-      }
-
-      const viewModel = row.viewModel;
-      if (!viewModel) {
-        continue;
-      }
-
-      // 결제 건수 체크
-      const payCountText = viewModel.score?.payCount?.text ?? "0";
-      if (payCountText === "0") {
-        continue;
-      }
-
-      // 가격 정보 추출
-      const salePrice = Number(
-        (viewModel.price.price?.text ?? "0").replace(/,/g, "")
-      );
-      const discountsaleprice = viewModel.price.couponDiscountedBinPrice
-        ? Number(
-            (viewModel.price.couponDiscountedBinPrice ?? "0").replace(/,/g, "")
-          )
-        : salePrice;
-      const discountrate = viewModel.price.discountRate
-        ? Number((viewModel.price.discountRate ?? "0").replace(/,/g, ""))
-        : 0;
-
-      // 배송비 추출
-      let deliveryfee = 0;
-      if (viewModel.isFreeDelivery) {
-        deliveryfee = 0;
-      } else {
-        // deliveryTags에서 배송비 확인
-        if (viewModel.deliveryTags && Array.isArray(viewModel.deliveryTags)) {
-          const deliveryTag = viewModel.deliveryTags.find(
-            (tag: any) => tag.text?.text && tag.text.text.includes("배송비")
-          );
-          if (deliveryTag?.text?.text) {
-            const match = deliveryTag.text.text.match(/(\d{1,3}(,\d{3})*)/);
-            if (match) {
-              deliveryfee = Number(match[0].replace(/,/g, ""));
-            }
-          }
-        }
-
-        // 기존 tags에서 배송비 확인 (폴백)
-        if (deliveryfee === 0 && viewModel.tags && Array.isArray(viewModel.tags)) {
-          const tag = viewModel.tags.find((tag: string) =>
-            tag.startsWith("배송비")
-          );
-          if (tag) {
-            const match = tag.match(/(\d{1,3}(,\d{3})*)/);
-            if (match) {
-              deliveryfee = Number(match[0].replace(/,/g, ""));
-            }
-          }
-        }
-      }
-
-      // 해외직구 여부 확인
-      const isOverseas =
-        viewModel.sellerOfficialTag?.title?.some(
-          (item: any) => item.text === "해외직구"
-        ) || false;
-
-      collectedProducts.push({
-        goodscode: viewModel.itemNo,
-        goodsname: viewModel.item.text,
-        imageurl: viewModel.item.imageUrl,
-        goodsurl: viewModel.item.link,
-        saleprice: salePrice,
-        discountsaleprice: discountsaleprice,
-        discountrate: discountrate,
-        deliveryfee: deliveryfee,
-        seoinfo: "",
-        nvcate: "",
-        isOverseas: isOverseas,
-      });
-    }
-  }
-
-  return collectedProducts;
-}
-
-/**
  * 옥션 크롤링
+ * - raw data를 서버로 전송 (서버에서 파싱)
  */
 export async function crawlAuction(
   page: any,
@@ -212,119 +116,79 @@ export async function crawlAuction(
     },
   };
 
+  // 서버에 데이터 전송
+  let postData: any;
+
   if (!textContent) {
     result.data!.errorMsg = "데이터 로드 실패";
-    return outputResult(result, task);
+    // 에러 결과는 isParsed: true로 전송
+    postData = {
+      data: {
+        urlnum: task.URLNUM,
+        usernum: task.USERNUM,
+        spricelimit: task.SPRICELIMIT,
+        epricelimit: task.EPRICELIMIT,
+        platforms: task.URLPLATFORMS,
+        bestyn: task.BESTYN,
+        newyn: task.NEWYN,
+        result: result.data,
+      },
+      context: { isParsed: true },
+    };
+  } else {
+    let data: any;
+    try {
+      data = JSON.parse(textContent);
+    } catch {
+      result.data!.errorMsg = "데이터 파싱 실패";
+      // 파싱 에러 결과는 isParsed: true로 전송
+      postData = {
+        data: {
+          urlnum: task.URLNUM,
+          usernum: task.USERNUM,
+          spricelimit: task.SPRICELIMIT,
+          epricelimit: task.EPRICELIMIT,
+          platforms: task.URLPLATFORMS,
+          bestyn: task.BESTYN,
+          newyn: task.NEWYN,
+          result: result.data,
+        },
+        context: { isParsed: true },
+      };
+    }
+
+    if (data) {
+      // raw data를 서버로 전송 (서버에서 파싱)
+      result.success = true;
+      postData = {
+        data: data,
+        context: {
+          isParsed: false,
+          urlnum: task.URLNUM,
+          usernum: task.USERNUM,
+          spricelimit: task.SPRICELIMIT,
+          epricelimit: task.EPRICELIMIT,
+          platforms: task.URLPLATFORMS,
+          bestyn: task.BESTYN,
+          newyn: task.NEWYN,
+        },
+      };
+    }
   }
 
-  let data: any;
-  try {
-    data = JSON.parse(textContent);
-  } catch (error) {
-    result.data!.errorMsg = "데이터 파싱 실패";
-    return outputResult(result, task);
-  }
-
-  // 데이터 구조 탐색
-  const modules =
-    data.props?.pageProps?.initialStates?.curatorData?.regionsData?.content
-      ?.modules;
-
-  if (!modules || !Array.isArray(modules)) {
-    result.data!.errorMsg = "상품 데이터 없음";
-    return outputResult(result, task);
-  }
-
-  // 상품 수집
-  const collectedProducts = collectAuctionProducts(modules);
-
-  if (collectedProducts.length === 0) {
-    result.data!.errorMsg = "상품 없음";
-    return outputResult(result, task);
-  }
-
-  // 중복 제거
-  const uniqueProducts = Array.from(
-    collectedProducts
-      .reduce((map: any, item: any) => map.set(item.goodscode, item), new Map())
-      .values()
-  );
-
-  // 해외직구 상품만 필터링
-  const overseasProducts = uniqueProducts.filter(
-    (item: any) => item.isOverseas === true
-  );
-
-  if (overseasProducts.length === 0) {
-    result.data!.errorMsg = "국내사업자입니다.";
-    return outputResult(result, task);
-  }
-
-  // 가격 필터링
-  const spricelimit: number = +task.SPRICELIMIT;
-  const epricelimit: number = +task.EPRICELIMIT;
-
-  const priceFiltered = overseasProducts.filter(
-    (item: any) =>
-      item.saleprice >= spricelimit && item.saleprice <= epricelimit
-  );
-
-  // 이름 필터링
-  const nameFiltered = priceFiltered.filter((item: any) =>
-    Boolean(item.goodsname)
-  );
-
-  if (nameFiltered.length === 0) {
-    result.data!.errorMsg = "가격/이름 필터링 후 상품 없음";
-    return outputResult(result, task);
-  }
-
-  // 최종 결과
-  result.success = true;
-  result.data!.error = false;
-  result.data!.errorMsg = "수집성공";
-  result.data!.list = nameFiltered.map((item: any) => ({
-    goodscode: item.goodscode,
-    goodsname: item.goodsname,
-    saleprice: item.saleprice,
-    discountsaleprice: item.discountsaleprice,
-    discountrate: item.discountrate,
-    deliveryfee: item.deliveryfee,
-    nvcate: item.nvcate,
-    imageurl: item.imageurl,
-    goodsurl: item.goodsurl,
-    seoinfo: item.seoinfo,
-  }));
-
-  return outputResult(result, task);
-}
-
-/**
- * 결과 출력 및 서버 전송
- */
-async function outputResult(result: CrawlResult, task: CrawlTask): Promise<CrawlResult> {
-  // 서버에 데이터 전송
-  const postData = {
-    urlnum: task.URLNUM,
-    usernum: task.USERNUM,
-    spricelimit: task.SPRICELIMIT,
-    epricelimit: task.EPRICELIMIT,
-    platforms: task.URLPLATFORMS,
-    bestyn: task.BESTYN,
-    newyn: task.NEWYN,
-    result: result.data || { error: true, errorMsg: "", list: [] },
-  };
-
-  const postResult = await postGoodsList(postData);
+  const postResult = await postGoodsList(postData, task.URLPLATFORMS);
   result.todayStop = postResult.todayStop;
   result.serverTransmitted = postResult.success;
 
   // 서버 전송 결과 출력
   const statusIcon = result.success ? "✓" : "✗";
-  const productCount = result.data!.list.length;
-  const transmitStatus = postResult.success ? (postResult.todayStop ? "중단" : "완료") : "실패";
+  const transmitStatus = postResult.success
+    ? postResult.todayStop
+      ? "중단"
+      : "완료"
+    : "실패";
   console.log(
-    `[Auction] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg} | 상품: ${productCount}개 | Auction 서버전송: ${transmitStatus}`
+    `[Auction] ${statusIcon} ${task.TARGETSTORENAME} | ${result.data!.errorMsg || "raw data 전송"} | Auction 서버전송: ${transmitStatus}`
   );
 
   return result;
