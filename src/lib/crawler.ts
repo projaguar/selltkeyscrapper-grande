@@ -941,27 +941,61 @@ async function preparePage(
 ): Promise<any> {
   const page = await browser.getPage();
   const currentUrl = await browser.getCurrentUrl();
+  const profileName = browser.getProfileName();
 
   // Base URL로 이동 (필요시)
-  if (task.URLPLATFORMS === "NAVER" && !currentUrl.includes("naver.com")) {
-    await page.goto("https://www.naver.com/", {
-      waitUntil: "load",
-      timeout: 60000,
-    });
+  if (task.URLPLATFORMS === "NAVER") {
+    const isNaverMain = isNaverMainUrl(currentUrl);
 
-    const afterGotoUrl = page.url();
-    if (
-      afterGotoUrl.startsWith("chrome-error://") ||
-      afterGotoUrl === "about:blank"
-    ) {
-      throw new Error("naver.com 이동 실패 (네트워크/프록시 오류)");
-    }
-    if (!afterGotoUrl.includes("naver.com")) {
-      throw new Error(`naver.com 이동 실패: ${afterGotoUrl}`);
-    }
+    if (!isNaverMain) {
+      let backOk = false;
 
-    const randomDelay = Math.floor(Math.random() * 6000) + 2000;
-    await delay(randomDelay);
+      // 이전 크롤링 결과 페이지(네이버 도메인)에서 history.back으로 메인 복귀 시도
+      if (currentUrl.includes("naver.com")) {
+        try {
+          const backStart = Date.now();
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: "load", timeout: 30000 }),
+            page.goBack(),
+          ]);
+          if (isNaverMainUrl(page.url())) {
+            backOk = true;
+            console.log(
+              `[Navigate] ${profileName} - goBack to naver main: ${Date.now() - backStart}ms`,
+            );
+          } else {
+            console.log(
+              `[Navigate] ${profileName} - goBack landed on ${page.url()}, fallback to goto`,
+            );
+          }
+        } catch (e: any) {
+          console.log(
+            `[Navigate] ${profileName} - goBack failed (${e.message}), fallback to goto`,
+          );
+        }
+      }
+
+      if (!backOk) {
+        await page.goto("https://www.naver.com/", {
+          waitUntil: "load",
+          timeout: 60000,
+        });
+
+        const afterGotoUrl = page.url();
+        if (
+          afterGotoUrl.startsWith("chrome-error://") ||
+          afterGotoUrl === "about:blank"
+        ) {
+          throw new Error("naver.com 이동 실패 (네트워크/프록시 오류)");
+        }
+        if (!afterGotoUrl.includes("naver.com")) {
+          throw new Error(`naver.com 이동 실패: ${afterGotoUrl}`);
+        }
+      }
+
+      const randomDelay = Math.floor(Math.random() * 6000) + 2000;
+      await delay(randomDelay);
+    }
   } else if (
     task.URLPLATFORMS === "AUCTION" &&
     !currentUrl.includes("auction.co.kr")
@@ -1139,6 +1173,21 @@ async function navigateToTarget(
  */
 async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 현재 URL이 네이버 메인(www.naver.com/) 인지 판별
+ */
+function isNaverMainUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.hostname === "www.naver.com" &&
+      (u.pathname === "" || u.pathname === "/")
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
