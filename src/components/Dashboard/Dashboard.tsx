@@ -26,11 +26,31 @@ interface BrowserStatusInfo {
   error?: string;
 }
 
+interface SkipBreakdown {
+  blockedUser: number;
+  serverTransmitFail: number;
+  captcha: number;
+  deadBrowser: number;
+  cloudflareBlock: number;
+  exception: number;
+}
+
+// 스킵 사유 표시 정의 (표시 순서대로)
+const SKIP_REASONS: { key: keyof SkipBreakdown; label: string; icon: string }[] = [
+  { key: 'blockedUser', label: '차단 사용자(todayStop)', icon: '🚫' },
+  { key: 'serverTransmitFail', label: '서버 전송 실패', icon: '📡' },
+  { key: 'captcha', label: 'CAPTCHA 감지', icon: '🤖' },
+  { key: 'deadBrowser', label: '브라우저 죽음', icon: '💀' },
+  { key: 'cloudflareBlock', label: 'Cloudflare 차단', icon: '🛡️' },
+  { key: 'exception', label: '기타 예외', icon: '⚠️' },
+];
+
 interface CrawlerProgress {
   isRunning: boolean;
   totalTasks: number;
   completedTasks: number;
   skippedTasks: number;  // 오류/CAPTCHA로 스킵된 Task
+  skipBreakdown?: SkipBreakdown;  // 스킵 사유별 분류
   pendingTasks: number;
   todayStopCount: number;
   elapsedTime: number;
@@ -416,6 +436,37 @@ function Dashboard() {
                 <div className="text-xs text-gray-500 mt-1">todayStop</div>
               </div>
             </div>
+
+            {/* 스킵/오류 사유 분류 */}
+            {progress.skippedTasks > 0 && progress.skipBreakdown && (
+              <div className="mt-4 p-4 bg-orange-50 rounded-lg border border-orange-100">
+                <div className="text-xs font-semibold text-orange-700 mb-3">
+                  스킵/오류 사유 분류 (총 {progress.skippedTasks}건)
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {SKIP_REASONS.map(({ key, label, icon }) => {
+                    const count = progress.skipBreakdown?.[key] || 0;
+                    return (
+                      <div
+                        key={key}
+                        className={`flex items-center justify-between px-3 py-2 rounded border ${
+                          count > 0
+                            ? 'bg-white border-orange-200'
+                            : 'bg-transparent border-transparent'
+                        }`}
+                      >
+                        <span className={`text-xs ${count > 0 ? 'text-gray-700' : 'text-gray-400'}`}>
+                          {icon} {label}
+                        </span>
+                        <span className={`text-sm font-bold ml-2 ${count > 0 ? 'text-orange-600' : 'text-gray-300'}`}>
+                          {count}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* 경과 시간 */}
             {progress.isRunning && progress.elapsedTime > 0 && (

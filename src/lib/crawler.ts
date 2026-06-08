@@ -208,7 +208,7 @@ async function browserWorker(
     // Queue에서 Task 가져오기 (todayStop된 USERNUM 자동 스킵)
     const { task, skippedByTodayStop } = taskQueue.getNext();
     if (skippedByTodayStop > 0) {
-      incrementSkipped(skippedByTodayStop);
+      incrementSkipped(skippedByTodayStop, "blockedUser");
     }
 
     // Task 없으면 짧게 대기 후 재시도 (중지 신호 빠르게 반응)
@@ -263,7 +263,8 @@ async function browserWorker(
       if (result.serverTransmitted) {
         incrementCompleted(1);
       } else {
-        incrementSkipped(1);
+        // CAPTCHA로 인한 중단과 순수 서버 전송 실패를 구분
+        incrementSkipped(1, result.captchaDetected ? "captcha" : "serverTransmitFail");
       }
 
       // CAPTCHA 감지 시 프로필 재생성 (새 fingerprint + 새 proxy)
@@ -277,15 +278,24 @@ async function browserWorker(
       const errorMsg = error.message || "Unknown error";
       taskQueue.markFailed(task, errorMsg);
       browser.completeCrawling("error", errorMsg);
-      incrementSkipped(1);
-
-      // 중지 요청 시 재시작 안 함
-      if (shouldStop()) break;
 
       // 브라우저 죽음 감지
       const isDeadBrowser = DEAD_BROWSER_PATTERNS.some((p) =>
         errorMsg.includes(p),
       );
+      // 예외 사유 분류: Cloudflare 차단 > 브라우저 죽음 > 기타 예외
+      const isCloudflareBlock = errorMsg.includes("Cloudflare");
+      incrementSkipped(
+        1,
+        isCloudflareBlock
+          ? "cloudflareBlock"
+          : isDeadBrowser
+            ? "deadBrowser"
+            : "exception",
+      );
+
+      // 중지 요청 시 재시작 안 함
+      if (shouldStop()) break;
 
       if (isDeadBrowser) {
         consecutiveDeadErrors++;

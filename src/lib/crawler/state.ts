@@ -31,6 +31,41 @@ let completedTasksCount = 0;
 let skippedTasksCount = 0;
 let currentBatchNumber = 0;
 
+// 스킵 사유 분류
+// - blockedUser: todayStop 차단된 사용자의 태스크
+// - serverTransmitFail: 크롤링은 됐으나 서버 전송(POST) 실패
+// - captcha: CAPTCHA 감지로 처리 중단
+// - deadBrowser: 브라우저 프로세스 죽음/연결 끊김
+// - cloudflareBlock: Cloudflare 차단 (옥션)
+// - exception: 기타 예외 (timeout, navigation 등)
+export type SkipReason =
+  | 'blockedUser'
+  | 'serverTransmitFail'
+  | 'captcha'
+  | 'deadBrowser'
+  | 'cloudflareBlock'
+  | 'exception';
+
+export interface SkipBreakdown {
+  blockedUser: number;
+  serverTransmitFail: number;
+  captcha: number;
+  deadBrowser: number;
+  cloudflareBlock: number;
+  exception: number;
+}
+
+const createEmptySkipBreakdown = (): SkipBreakdown => ({
+  blockedUser: 0,
+  serverTransmitFail: 0,
+  captcha: 0,
+  deadBrowser: 0,
+  cloudflareBlock: 0,
+  exception: 0,
+});
+
+let skipBreakdown: SkipBreakdown = createEmptySkipBreakdown();
+
 // 대기 상태 (5분 대기 progress bar 용)
 let waitEndTime: number | null = null;
 let waitReason = '';
@@ -174,6 +209,7 @@ export function resetProgress(): void {
   totalTasksCount = 0;
   completedTasksCount = 0;
   skippedTasksCount = 0;
+  skipBreakdown = createEmptySkipBreakdown();
   currentBatchNumber = 0;
   waitEndTime = null;
   waitReason = '';
@@ -203,9 +239,14 @@ export function incrementCompleted(count: number = 1): void {
 
 /**
  * 스킵된 Task 수 증가 (오류/CAPTCHA 등)
+ * @param reason 스킵 사유 (사유별 분류 집계용)
  */
-export function incrementSkipped(count: number = 1): void {
+export function incrementSkipped(
+  count: number = 1,
+  reason: SkipReason = 'exception',
+): void {
   skippedTasksCount += count;
+  skipBreakdown[reason] += count;
 }
 
 /**
@@ -239,6 +280,7 @@ export interface CrawlerProgress {
   totalTasks: number;
   completedTasks: number;
   skippedTasks: number;
+  skipBreakdown: SkipBreakdown;
   pendingTasks: number;
   todayStopCount: number;
   currentBatch: number;
@@ -292,6 +334,7 @@ export function getCrawlerProgress(): CrawlerProgress {
     totalTasks: totalTasksCount,
     completedTasks: completedTasksCount,
     skippedTasks: skippedTasksCount,
+    skipBreakdown: { ...skipBreakdown },
     pendingTasks: taskQueue.length,
     todayStopCount: blockedUserNums.size,
     currentBatch: currentBatchNumber,
