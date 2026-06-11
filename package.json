@@ -1,7 +1,7 @@
 {
   "name": "selltkeyscrapper-grande",
   "private": true,
-  "version": "1.1.2",
+  "version": "1.1.14",
   "description": "selltkeyscrapper grande - Browser automation with Puppeteer for web scraping",
   "main": "./out/main/index.js",
   "scripts": {

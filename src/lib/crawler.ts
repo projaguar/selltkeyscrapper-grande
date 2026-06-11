@@ -8,6 +8,8 @@
  * - Consumer: 각 브라우저 Worker가 독립적으로 Queue에서 Task 가져와 처리
  */
 
+import * as os from "node:os";
+
 // 타입
 import type { CrawlTask, CrawlResult } from "./crawler/types";
 export type { CrawlTask, CrawlResult, Session } from "./crawler/types";
@@ -52,6 +54,7 @@ import {
   initRestartLogger,
   logRestart,
   logBlocked,
+  logSkipError,
   incrementStat,
   resetRestartStats,
 } from "./crawler/restart-logger";
@@ -283,16 +286,35 @@ async function browserWorker(
       const isDeadBrowser = DEAD_BROWSER_PATTERNS.some((p) =>
         errorMsg.includes(p),
       );
-      // 예외 사유 분류: Cloudflare 차단 > 브라우저 죽음 > 기타 예외
+      // 예외 사유 분류: Cloudflare 차단 > 브라우저 죽음 > 타임아웃 > 네트워크 > 기타
       const isCloudflareBlock = errorMsg.includes("Cloudflare");
-      incrementSkipped(
-        1,
-        isCloudflareBlock
-          ? "cloudflareBlock"
-          : isDeadBrowser
-            ? "deadBrowser"
-            : "exception",
-      );
+      const isTimeout = /timeout|ETIMEDOUT|Timeout waiting/i.test(errorMsg);
+      const isNetwork =
+        /ECONNREFUSED|ECONNRESET|ENOTFOUND|net::ERR_|페이지 로드 실패|이동 실패|socket hang up/i.test(
+          errorMsg,
+        );
+      const skipReason = isCloudflareBlock
+        ? "cloudflareBlock"
+        : isDeadBrowser
+          ? "deadBrowser"
+          : isTimeout
+            ? "timeout"
+            : isNetwork
+              ? "network"
+              : "exception";
+      incrementSkipped(1, skipReason);
+
+      // 어떤 예외였는지 상세 로그 ('기타(exception)' 원인 추적용 - 메시지 + 스택)
+      logSkipError({
+        reason: skipReason,
+        platform: task.URLPLATFORMS,
+        workerIndex,
+        profileName,
+        urlnum: task.URLNUM,
+        usernum: task.USERNUM,
+        errorMsg,
+        stack: error?.stack,
+      });
 
       // 중지 요청 시 재시작 안 함
       if (shouldStop()) break;
@@ -1041,6 +1063,76 @@ async function preparePage(
  * 타겟 URL로 이동
  * =====================================================
  */
+/**
+ * 네비게이션 타임아웃/실패 시 원인 진단 정보 수집
+ * - 시스템 리소스(CPU 부하/메모리)와 페이지 상태를 캡처하여 에러 메시지에 첨부
+ * - 이걸로 "네트워크 / 리소스 부족 / 페이지 로딩(load 이벤트) 지연"을 구분
+ */
+async function collectNavDiagnostics(
+  page: any,
+  navStart: number,
+): Promise<string> {
+  const parts: string[] = [];
+
+  // 1) 시스템 리소스 (이 머신이 과부하인지)
+  try {
+    const load1 = os.loadavg()[0]; // 최근 1분 평균 부하
+    const cores = os.cpus().length;
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const freeMb = Math.round(freeMem / 1024 / 1024);
+    const usedPct = Math.round((1 - freeMem / totalMem) * 100);
+    parts.push(`cpu=${load1.toFixed(1)}/${cores}`);
+    parts.push(`memFree=${freeMb}MB(${usedPct}%used)`);
+  } catch {
+    parts.push("sys=?");
+  }
+
+  // 2) 페이지 상태 (3초 가드 — evaluate 자체가 멈추면 페이지/연결이 죽은 것)
+  try {
+    const pageState: any = await Promise.race([
+      page.evaluate(() => ({
+        url: location.href,
+        readyState: document.readyState,
+        hasPreloaded:
+          typeof (window as any).__PRELOADED_STATE__ !== "undefined",
+        resourceCount: performance.getEntriesByType("resource").length,
+        // responseEnd === 0 → 아직 완료되지 않은 리소스
+        pending: performance
+          .getEntriesByType("resource")
+          .filter((r: any) => !r.responseEnd).length,
+      })),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("diag-eval-timeout")), 3000),
+      ),
+    ]);
+    const shortUrl = String(pageState.url)
+      .replace(/^https?:\/\//, "")
+      .slice(0, 60);
+    parts.push(`readyState=${pageState.readyState}`);
+    parts.push(`preloaded=${pageState.hasPreloaded}`);
+    parts.push(
+      `res=${pageState.resourceCount}(pending ${pageState.pending})`,
+    );
+    parts.push(`url=${shortUrl}`);
+  } catch (e: any) {
+    // evaluate가 멈추거나 실패 → 페이지/렌더러/연결 이상 (네트워크 행 가능성)
+    parts.push(`pageEval=FAIL(${e?.message || "?"})`);
+    try {
+      parts.push(
+        `url=${String(page.url())
+          .replace(/^https?:\/\//, "")
+          .slice(0, 60)}`,
+      );
+    } catch {
+      /* page.url()도 실패 */
+    }
+  }
+
+  parts.push(`elapsed=${((Date.now() - navStart) / 1000).toFixed(1)}s`);
+  return parts.join(", ");
+}
+
 async function navigateToTarget(
   page: any,
   task: CrawlTask,
@@ -1095,18 +1187,28 @@ async function navigateToTarget(
 
   // 클릭 및 네비게이션 대기 (Promise.all로 동시 await — unhandled rejection 방지)
   const navStart = Date.now();
-  const waitCondition =
-    task.URLPLATFORMS === "NAVER" ? "load" : "domcontentloaded";
+  // 모든 플랫폼 domcontentloaded 기준.
+  // (이전엔 NAVER만 "load" = 광고/트래커까지 전부 로딩 완료를 60초 대기 →
+  //  광고 리소스 지연으로 타임아웃 다발. 필요한 데이터는 아래 waitForFunction으로 별도 확인하므로
+  //  DOM 파싱 완료 시점에 진행해도 안전. 리소스는 window.stop() 안 하므로 백그라운드 계속 로딩됨)
+  const waitCondition = "domcontentloaded";
 
-  await Promise.all([
-    page.waitForNavigation({
-      waitUntil: waitCondition,
-      timeout: 60000,
-    }),
-    page.click(`#${uniqueId}`, {
-      delay: Math.floor(Math.random() * 50) + 30,
-    }),
-  ]);
+  try {
+    await Promise.all([
+      page.waitForNavigation({
+        waitUntil: waitCondition,
+        timeout: 60000,
+      }),
+      page.click(`#${uniqueId}`, {
+        delay: Math.floor(Math.random() * 50) + 30,
+      }),
+    ]);
+  } catch (navErr: any) {
+    // 타임아웃/네비게이션 실패 → 원인 진단 정보를 에러에 첨부 (skip-error 로그로 전달됨)
+    const diag = await collectNavDiagnostics(page, navStart);
+    navErr.message = `${navErr.message || "navigation error"} [diag: ${diag}]`;
+    throw navErr;
+  }
   console.log(
     `[Navigate] ${profileName} - ${waitCondition}: ${Date.now() - navStart}ms`,
   );
@@ -1162,9 +1264,16 @@ async function navigateToTarget(
     }
   } else if (task.URLPLATFORMS === "NAVER") {
     // Naver: window.__PRELOADED_STATE__ 존재 확인
-    await page.waitForFunction(() => !!(window as any).__PRELOADED_STATE__, {
-      timeout: 30000,
-    });
+    try {
+      await page.waitForFunction(() => !!(window as any).__PRELOADED_STATE__, {
+        timeout: 30000,
+      });
+    } catch (waitErr: any) {
+      // 데이터 대기 타임아웃 → 진단 정보 첨부
+      const diag = await collectNavDiagnostics(page, navStart);
+      waitErr.message = `Naver __PRELOADED_STATE__ wait timeout: ${waitErr.message || ""} [diag: ${diag}]`;
+      throw waitErr;
+    }
     console.log(
       `[Navigate] ${profileName} - data wait: ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
     );

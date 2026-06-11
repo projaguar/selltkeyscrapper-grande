@@ -37,13 +37,17 @@ let currentBatchNumber = 0;
 // - captcha: CAPTCHA 감지로 처리 중단
 // - deadBrowser: 브라우저 프로세스 죽음/연결 끊김
 // - cloudflareBlock: Cloudflare 차단 (옥션)
-// - exception: 기타 예외 (timeout, navigation 등)
+// - timeout: 네비게이션/대기 타임아웃 (페이지 로딩 지연)
+// - network: 네트워크/프록시 연결 실패 (페이지 로드 실패 등)
+// - exception: 위 어디에도 해당 안 되는 기타 예외
 export type SkipReason =
   | 'blockedUser'
   | 'serverTransmitFail'
   | 'captcha'
   | 'deadBrowser'
   | 'cloudflareBlock'
+  | 'timeout'
+  | 'network'
   | 'exception';
 
 export interface SkipBreakdown {
@@ -52,6 +56,8 @@ export interface SkipBreakdown {
   captcha: number;
   deadBrowser: number;
   cloudflareBlock: number;
+  timeout: number;
+  network: number;
   exception: number;
 }
 
@@ -61,6 +67,8 @@ const createEmptySkipBreakdown = (): SkipBreakdown => ({
   captcha: 0,
   deadBrowser: 0,
   cloudflareBlock: 0,
+  timeout: 0,
+  network: 0,
   exception: 0,
 });
 

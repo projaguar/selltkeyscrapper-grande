@@ -5,7 +5,7 @@
  * - 콘솔에도 카테고리 태그 출력
  */
 
-import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 
 // ========================================
@@ -143,6 +143,164 @@ export function logBlocked(site: string, profileName: string): void {
   if (blockLogFilePath) {
     try {
       appendFileSync(blockLogFilePath, `${timestamp}\t${site}\t${profileName}\n`);
+    } catch {
+      // 파일 쓰기 실패 무시
+    }
+  }
+}
+
+// ========================================
+// 서버 전송 실패 로그 (URL / 전송 데이터 / 응답 오류)
+// ========================================
+
+let transmitFailLogFilePath: string | null = null;
+let transmitFailDumpDir: string | null = null;
+
+function ensureTransmitFailLogFile(): void {
+  if (transmitFailLogFilePath) return;
+  if (!logFilePath) return;
+  const logDir = dirname(logFilePath);
+  const today = new Date().toISOString().slice(0, 10);
+
+  transmitFailLogFilePath = join(logDir, `transmit-fail-${today}.tsv`);
+  if (!existsSync(transmitFailLogFilePath)) {
+    appendFileSync(
+      transmitFailLogFilePath,
+      "시간\t플랫폼\tURL\tHTTP상태\t에러\tpayload크기\tcontext\t상세파일\n",
+    );
+  }
+
+  // 전체 payload/응답 본문을 보관할 디렉토리
+  transmitFailDumpDir = join(logDir, "transmit-fail");
+  if (!existsSync(transmitFailDumpDir)) {
+    mkdirSync(transmitFailDumpDir, { recursive: true });
+  }
+}
+
+export interface TransmitFailEntry {
+  platform: string;
+  url: string;
+  error: string; // 에러 메시지 (HTTP status 또는 예외 메시지)
+  status?: number; // HTTP 상태 코드 (있을 경우)
+  responseBody?: string; // 서버가 반환한 응답 본문
+  payload: any; // 실제 전송한 데이터
+}
+
+export function logTransmitFail(entry: TransmitFailEntry): void {
+  const now = new Date();
+  const timestamp = now.toISOString().slice(11, 19); // HH:MM:SS
+
+  // payload 직렬화 및 크기 계산
+  let payloadStr = "";
+  let payloadSize = 0;
+  try {
+    payloadStr = JSON.stringify(entry.payload);
+    payloadSize = Buffer.byteLength(payloadStr);
+  } catch {
+    payloadStr = "<직렬화 실패>";
+  }
+
+  // context 요약 (usernum/urlnum 등)
+  const ctx = entry.payload?.context || {};
+  const ctxSummary = `usernum=${ctx.usernum ?? "-"},urlnum=${ctx.urlnum ?? "-"}`;
+
+  // 콘솔 출력
+  console.error(
+    `[TransmitFail] ${entry.platform} | ${entry.url} | ${entry.error} | ${ctxSummary} | ${payloadSize}B`,
+  );
+
+  ensureTransmitFailLogFile();
+
+  // 전체 payload + 응답 본문을 별도 JSON 파일로 덤프
+  let dumpFileName = "-";
+  if (transmitFailDumpDir) {
+    const safeTime = now.toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    dumpFileName = `${safeTime}_${entry.platform}_${ctx.urlnum ?? "x"}_${ctx.usernum ?? "x"}.json`;
+    try {
+      writeFileSync(
+        join(transmitFailDumpDir, dumpFileName),
+        JSON.stringify(
+          {
+            time: now.toISOString(),
+            platform: entry.platform,
+            url: entry.url,
+            status: entry.status ?? null,
+            error: entry.error,
+            responseBody: entry.responseBody ?? null,
+            payload: entry.payload,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (e: any) {
+      console.error(`[TransmitFail] 덤프 파일 작성 실패: ${e?.message}`);
+      dumpFileName = "<덤프실패>";
+    }
+  }
+
+  // 요약 TSV 기록
+  if (transmitFailLogFilePath) {
+    const safeError = (entry.error || "-").replace(/[\t\n\r]/g, " ");
+    const line = `${timestamp}\t${entry.platform}\t${entry.url}\t${entry.status ?? "-"}\t${safeError}\t${payloadSize}\t${ctxSummary}\t${dumpFileName}\n`;
+    try {
+      appendFileSync(transmitFailLogFilePath, line);
+    } catch {
+      // 파일 쓰기 실패 무시
+    }
+  }
+}
+
+// ========================================
+// Skip 예외 상세 로그 (특히 '기타(exception)' 원인 추적)
+// ========================================
+
+let skipErrorLogFilePath: string | null = null;
+
+function ensureSkipErrorLogFile(): void {
+  if (skipErrorLogFilePath) return;
+  if (!logFilePath) return;
+  const logDir = dirname(logFilePath);
+  const today = new Date().toISOString().slice(0, 10);
+  skipErrorLogFilePath = join(logDir, `skip-error-${today}.tsv`);
+  if (!existsSync(skipErrorLogFilePath)) {
+    appendFileSync(
+      skipErrorLogFilePath,
+      "시간\t분류\t플랫폼\t워커\t프로필\tURLNUM\tUSERNUM\t에러\t스택\n",
+    );
+  }
+}
+
+export interface SkipErrorEntry {
+  reason: string; // skip 분류 (exception / cloudflareBlock / deadBrowser 등)
+  platform?: string;
+  workerIndex: number;
+  profileName: string;
+  urlnum?: string | number;
+  usernum?: string | number;
+  errorMsg: string;
+  stack?: string;
+}
+
+export function logSkipError(entry: SkipErrorEntry): void {
+  const timestamp = new Date().toISOString().slice(11, 19); // HH:MM:SS
+
+  // 콘솔 출력
+  console.error(
+    `[SkipError][${entry.reason}] Worker ${entry.workerIndex} | ${entry.profileName} | ${entry.platform ?? "-"} | urlnum=${entry.urlnum ?? "-"} | ${entry.errorMsg}`,
+  );
+
+  ensureSkipErrorLogFile();
+
+  if (skipErrorLogFilePath) {
+    const clean = (s?: string) => (s || "-").replace(/[\t\r\n]/g, " ");
+    // 스택은 한 줄로 평탄화하여 보관 (탭/개행 제거)
+    const stackOneLine = entry.stack
+      ? entry.stack.replace(/[\t\r\n]+/g, " ⏎ ")
+      : "-";
+    const line = `${timestamp}\t${entry.reason}\t${entry.platform ?? "-"}\t${entry.workerIndex}\t${entry.profileName}\t${entry.urlnum ?? "-"}\t${entry.usernum ?? "-"}\t${clean(entry.errorMsg)}\t${stackOneLine}\n`;
+    try {
+      appendFileSync(skipErrorLogFilePath, line);
     } catch {
       // 파일 쓰기 실패 무시
     }

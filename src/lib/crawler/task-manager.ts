@@ -20,6 +20,7 @@ import {
   getInsertUrl,
 } from "./state";
 import { getUrlList } from "../../services/api";
+import { logTransmitFail } from "./restart-logger";
 
 /**
  * Task 가져오기 (n개)
@@ -124,6 +125,7 @@ export function handleTodayStopResults(
  * @returns {success: 전송 성공 여부, todayStop: 오늘 중단 여부}
  */
 export async function postGoodsList(payload: any, platform: string): Promise<{success: boolean, todayStop: boolean, urlcount: number}> {
+  let url = "";
   try {
     const insertUrl = getInsertUrl();
 
@@ -137,7 +139,7 @@ export async function postGoodsList(payload: any, platform: string): Promise<{su
       payload.context.inserturl = insertUrl;
     }
 
-    const url = `https://api.opennest.co.kr/selltkey/v1/product-collect/relay-${platform.toLowerCase()}-goods`;
+    url = `https://api.opennest.co.kr/selltkey/v1/product-collect/relay-${platform.toLowerCase()}-goods`;
     const compressed = gzipSync(Buffer.from(JSON.stringify(payload)));
 
     const response = await fetch(url, {
@@ -150,13 +152,30 @@ export async function postGoodsList(payload: any, platform: string): Promise<{su
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      // 서버가 반환한 응답 본문까지 확보하여 로그로 남김
+      const responseBody = await response.text().catch(() => "");
+      logTransmitFail({
+        platform,
+        url,
+        status: response.status,
+        error: `HTTP error! status: ${response.status}`,
+        responseBody,
+        payload,
+      });
+      console.error(`[TaskManager] 서버 전송 실패: HTTP ${response.status}`);
+      return {success: false, todayStop: false, urlcount: 0};
     }
 
     const result = await response.json();
     return {success: true, todayStop: result.todayStop || false, urlcount: result.urlcount || 0};
   } catch (error: any) {
     console.error(`[TaskManager] 서버 전송 실패: ${error.message}`);
+    logTransmitFail({
+      platform,
+      url,
+      error: error?.message || String(error),
+      payload,
+    });
     return {success: false, todayStop: false, urlcount: 0};
   }
 }

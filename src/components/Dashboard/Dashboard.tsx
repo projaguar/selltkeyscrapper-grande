@@ -32,6 +32,8 @@ interface SkipBreakdown {
   captcha: number;
   deadBrowser: number;
   cloudflareBlock: number;
+  timeout: number;
+  network: number;
   exception: number;
 }
 
@@ -42,6 +44,8 @@ const SKIP_REASONS: { key: keyof SkipBreakdown; label: string; icon: string }[] 
   { key: 'captcha', label: 'CAPTCHA 감지', icon: '🤖' },
   { key: 'deadBrowser', label: '브라우저 죽음', icon: '💀' },
   { key: 'cloudflareBlock', label: 'Cloudflare 차단', icon: '🛡️' },
+  { key: 'timeout', label: '타임아웃(로딩 지연)', icon: '⏱️' },
+  { key: 'network', label: '네트워크/프록시 오류', icon: '🌐' },
   { key: 'exception', label: '기타 예외', icon: '⚠️' },
 ];
 
