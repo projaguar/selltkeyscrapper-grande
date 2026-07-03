@@ -73,7 +73,7 @@ interface PreparationResult {
 }
 
 function Dashboard() {
-  const { apiKey, proxies, adsPowerProfiles } = useStore();
+  const { apiKey, proxies } = useStore();
   const [progress, setProgress] = useState<CrawlerProgress | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isCrawling, setIsCrawling] = useState(false);
@@ -133,77 +133,61 @@ function Dashboard() {
 
   // 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
   const handlePrepareBrowsers = async () => {
-    if (adsPowerProfiles.length === 0) {
-      alert('⚠️ 시작할 프로필이 없습니다.');
-      return;
-    }
-
     setIsPreparing(true);
-
-    // 초기 준비 상태 설정 (모든 프로필 대기 중)
-    const initialStatuses: BrowserStatusInfo[] = adsPowerProfiles.map((profile) => ({
-      profileName: profile.name,
-      status: 'waiting' as BrowserStatus,
-      message: '대기 중...',
-    }));
-    setPreparingStatuses(initialStatuses);
+    setPreparingStatuses([]);
 
     try {
-      // 진행 상황 이벤트 리스너 등록
+      // 진행 상황 이벤트 리스너 등록 (총 개수는 진행 이벤트에서 전달됨)
       const removeListener = window.electronAPI.crawler.onPrepareProgress((data) => {
         const { current, total, result } = data;
-        console.log(`[Dashboard] Prepare progress: ${current}/${total}`, result);
-
-        // 해당 프로필의 상태 업데이트
-        setPreparingStatuses(prev => {
-          const newStatuses = [...prev];
+        setPreparingStatuses((prev) => {
+          const next =
+            prev.length === total
+              ? [...prev]
+              : Array.from({ length: total }, (_, i) =>
+                  prev[i] ?? {
+                    profileName: `프로필 ${i + 1}`,
+                    status: 'waiting' as BrowserStatus,
+                    message: '대기 중...',
+                  },
+                );
           const index = current - 1;
-          if (index >= 0 && index < newStatuses.length) {
-            newStatuses[index] = {
-              ...newStatuses[index],
+          if (index >= 0 && index < next.length) {
+            next[index] = {
+              ...next[index],
+              profileName: result.profileName || next[index].profileName,
               status: result.success ? 'success' : 'error',
               message: result.success
-                ? `준비 완료 (${result.proxyIp})`
+                ? `준비 완료 (${result.proxyIp ?? ''})`
                 : result.error || '준비 실패',
               proxyGroupName: result.proxyGroupName,
               proxyIp: result.proxyIp,
             };
           }
-          return newStatuses;
+          return next;
         });
       });
       removeProgressListenerRef.current = removeListener;
 
-      // 프로필 목록 준비 (AdsPower는 user_id 사용)
-      const profileList = adsPowerProfiles.map(p => ({
-        user_id: p.user_id,
-        name: p.name,
-      }));
-
-      // BrowserManager를 통해 브라우저 준비
+      // BrowserManager를 통해 그룹 풀에서 브라우저 자동 확보 + 준비
       console.log(`\n🔧 Preparing browsers with BrowserManager...`);
-      const result = await window.electronAPI.crawler.prepareBrowsers(apiKey, profileList);
+      const result = await window.electronAPI.crawler.prepareBrowsers(apiKey);
 
-      // 리스너 제거
       removeListener();
       removeProgressListenerRef.current = null;
 
       if (result.success) {
         const successCount = result.readyCount || 0;
-        const failCount = adsPowerProfiles.length - successCount;
         setReadyBrowserCount(successCount);
-
-        alert(
-          `🎉 브라우저 준비 완료\n\n✅ 성공: ${successCount}개\n❌ 실패: ${failCount}개`
-        );
+        alert(`🎉 브라우저 준비 완료\n\n✅ 준비: ${successCount}개`);
       } else {
         alert(`❌ 브라우저 준비 실패\n${result.error || '알 수 없는 오류'}`);
       }
-    } catch (error: any) {
-      alert(`❌ 오류 발생\n${error.message}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      alert(`❌ 오류 발생\n${msg}`);
     } finally {
       setIsPreparing(false);
-      // 준비 완료 후 상태 초기화 (3초 후)
       setTimeout(() => setPreparingStatuses([]), 3000);
     }
   };
@@ -316,7 +300,7 @@ function Dashboard() {
           {/* 브라우저 준비 버튼 */}
           <Button
             onClick={handlePrepareBrowsers}
-            disabled={isPreparing || isCrawling || adsPowerProfiles.length === 0}
+            disabled={isPreparing || isCrawling}
             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6"
           >
             {isPreparing ? '⏳ 준비 중...' : '🔗 브라우저 준비'}
@@ -366,8 +350,8 @@ function Dashboard() {
       {/* 통계 카드 */}
       <div className="grid grid-cols-2 gap-6 mb-8">
         <div className="bg-white p-6 rounded-lg shadow-md">
-          <div className="text-sm text-gray-500 mb-2">전체 프로필</div>
-          <div className="text-3xl font-bold">{adsPowerProfiles.length}</div>
+          <div className="text-sm text-gray-500 mb-2">준비된 브라우저</div>
+          <div className="text-3xl font-bold">{readyBrowserCount}</div>
         </div>
         <div className="bg-white p-6 rounded-lg shadow-md">
           <div className="text-sm text-gray-500 mb-2">활성 프록시</div>

@@ -1,6 +1,6 @@
 /**
  * AdsPower API 작업 큐 매니저 (싱글톤)
- * - 초당 2회 rate limiting (600ms 간격)
+ * - 초당 1회 rate limiting (1100ms 간격 — AdsPower 로컬 API 한도)
  * - 모든 AdsPower API 호출을 순차적으로 처리
  * - 브라우저 start/stop은 중복 방지 기능 포함
  */
@@ -19,7 +19,7 @@ class AdsPowerQueueManager {
   private queue: QueueTask[] = [];
   private processing: boolean = false;
   private lastRequestTime: number = 0;
-  private readonly MIN_INTERVAL_MS = 510; // 120 RPM = 500ms + 10ms 여유
+  private readonly MIN_INTERVAL_MS = 1100; // AdsPower 로컬 API = 초당 1회 → 1.1s 간격(실측 검증)
 
   // 현재 작업 중인 브라우저 추적 (start/stop 중복 방지)
   private activeBrowsers: Set<string> = new Set();

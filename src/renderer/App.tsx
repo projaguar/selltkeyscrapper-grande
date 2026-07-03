@@ -2,13 +2,12 @@ import { useEffect, useState } from 'react';
 import { useStore } from '../store';
 import Settings from '../components/Settings/Settings';
 import ProxyManager from '../components/ProxyManager/ProxyManager';
-import ProfileManager from '../components/ProfileManager/ProfileManager';
 import Dashboard from '../components/Dashboard/Dashboard';
 
 function App() {
-  const { currentTab, setCurrentTab, setApiKey, setProxies, setAdsPowerProfiles } = useStore();
+  const { currentTab, setCurrentTab, setApiKey, setProxies } = useStore();
   const [isInitializing, setIsInitializing] = useState(true);
-  const [initStatus, setInitStatus] = useState({ apiKey: false, proxies: false, profiles: false });
+  const [initStatus, setInitStatus] = useState({ apiKey: false, proxies: false });
 
   // 앱 시작 시 자동으로 필요한 데이터 로드
   useEffect(() => {
@@ -28,15 +27,6 @@ function App() {
             setProxies(proxiesData);
             setInitStatus(prev => ({ ...prev, proxies: true }));
 
-            // 3. AdsPower 프로필 로드
-            try {
-              const result = await window.electronAPI.adspower.listProfiles(savedApiKey);
-              const profiles = result.data?.list || [];
-              setAdsPowerProfiles(profiles);
-            } catch (e) {
-              console.error('[App] AdsPower 프로필 로드 실패:', e);
-            }
-            setInitStatus(prev => ({ ...prev, profiles: true }));
           }
         }
       } catch (error) {
@@ -47,11 +37,10 @@ function App() {
     };
 
     initializeApp();
-  }, [setApiKey, setProxies, setAdsPowerProfiles]);
+  }, [setApiKey, setProxies]);
 
   const tabs = [
     { id: 'dashboard', label: '대시보드', icon: '📊' },
-    { id: 'profile', label: '프로필 관리', icon: '👤' },
     { id: 'proxy', label: 'Proxy 관리', icon: '🌐' },
     { id: 'settings', label: '설정', icon: '⚙️' },
   ];
@@ -96,9 +85,6 @@ function App() {
               <div className={initStatus.proxies ? 'text-green-400' : 'text-red-400'}>
                 {initStatus.proxies ? '✓' : '✗'} Proxy
               </div>
-              <div className={initStatus.profiles ? 'text-green-400' : 'text-red-400'}>
-                {initStatus.profiles ? '✓' : '✗'} 프로필
-              </div>
             </div>
           )}
           <div className="text-xs text-gray-500 mt-2">v{__APP_VERSION__}</div>
@@ -113,14 +99,13 @@ function App() {
             <div className="text-center">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
               <div className="text-lg font-semibold text-gray-700">앱 초기화 중...</div>
-              <div className="text-sm text-gray-500 mt-2">프록시 및 프로필 데이터를 불러오고 있습니다</div>
+              <div className="text-sm text-gray-500 mt-2">프록시 데이터를 불러오고 있습니다</div>
             </div>
           </div>
         )}
 
         {currentTab === 'settings' && <Settings />}
         {currentTab === 'proxy' && <ProxyManager />}
-        {currentTab === 'profile' && <ProfileManager />}
         {currentTab === 'dashboard' && <Dashboard />}
       </div>
     </div>

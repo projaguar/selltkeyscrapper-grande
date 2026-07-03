@@ -8,8 +8,24 @@ import { getProxyPool } from '../lib/proxy-pool';
 import { getSessionManager } from '../lib/session-manager';
 import { startCrawling, stopCrawler, getCrawlerStatus, getCrawlerProgress } from '../lib/crawler';
 import { getBrowserManager, type PreparationResult } from '../lib/crawler/browser-manager';
+import { getProfilePool } from '../lib/crawler/profile-pool';
 
 let mainWindow: BrowserWindow | null = null;
+
+// scrapper 전용 AdsPower 그룹/풀 기본값 (prowler 등 타 앱과 격리)
+const DEFAULT_GROUP_NAME = 'scrapper';
+const DEFAULT_PROFILE_COUNT = 5;
+
+function settingStr(key: string, fallback: string): string {
+  const v: unknown = db.getSetting(key);
+  return typeof v === 'string' && v.length > 0 ? v : fallback;
+}
+
+function settingInt(key: string, fallback: number): number {
+  const v: unknown = db.getSetting(key);
+  const n = typeof v === 'string' ? parseInt(v, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -306,17 +322,28 @@ ipcMain.handle('api-get-url-list', async () => {
 // IPC Handlers - Crawler
 
 // 브라우저 준비 (DDD 패턴 - BrowserManager 사용)
-ipcMain.handle('crawler-prepare-browsers', async (
-  _event,
-  apiKey: string,
-  profiles: Array<{ user_id: string; name: string }>
-) => {
+ipcMain.handle('crawler-prepare-browsers', async (_event, apiKey: string) => {
   try {
-    console.log(`[Crawler] Preparing browsers with BrowserManager...`);
-    console.log(`[Crawler] Profiles count: ${profiles.length}`);
+    const groupName = settingStr('scrapperGroupName', DEFAULT_GROUP_NAME);
+    const count = settingInt('crawlProfileCount', DEFAULT_PROFILE_COUNT);
+    console.log(`[Crawler] Preparing pool: group="${groupName}", count=${count}`);
 
     const browserManager = getBrowserManager();
     browserManager.setApiKey(apiKey);
+
+    // 1. scrapper 전용 그룹 보장 → 프로필 격리
+    const pool = getProfilePool(apiKey);
+    const groupId = await pool.ensureGroupId(groupName);
+    browserManager.setGroupId(groupId);
+    db.setSetting('scrapperGroupId', groupId);
+
+    // 2. 그룹 내 프로필 풀 확보 (재사용 → 미분류 흡수 → 신규 생성)
+    const profiles = await pool.ensurePool(groupId, count);
+    console.log(`[Crawler] Pool ready: ${profiles.length}/${count} in group ${groupId}`);
+
+    if (profiles.length === 0) {
+      return { success: false, error: 'AdsPower 프로필을 확보하지 못했습니다 (한도/연결 확인)' };
+    }
 
     // 진행 상황을 렌더러에 전달하기 위한 콜백
     const onProgress = (index: number, total: number, result: PreparationResult) => {
@@ -338,10 +365,12 @@ ipcMain.handle('crawler-prepare-browsers', async (
       success: true,
       results,
       readyCount: successCount,
+      requestedCount: count,
     };
-  } catch (error: any) {
-    console.error('[Crawler] Failed to prepare browsers:', error);
-    return { success: false, error: error.message };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[Crawler] Failed to prepare browsers:', msg);
+    return { success: false, error: msg };
   }
 });
 
@@ -409,46 +438,6 @@ ipcMain.handle('crawler-get-progress', async () => {
 ipcMain.handle('adspower-list-profiles', async (_event, apiKey) => {
   try {
     return await adspower.listProfiles(apiKey);
-  } catch (error: any) {
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('adspower-create-profile', async (_event, apiKey, profileData) => {
-  try {
-    return await adspower.createProfile(apiKey, profileData);
-  } catch (error: any) {
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('adspower-get-profile', async (_event, apiKey, profileId) => {
-  try {
-    return await adspower.getProfile(apiKey, profileId);
-  } catch (error: any) {
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('adspower-update-profile', async (_event, apiKey, profileId, data) => {
-  try {
-    return await adspower.updateProfile(apiKey, profileId, data);
-  } catch (error: any) {
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('adspower-delete-profiles', async (_event, apiKey, profileIds) => {
-  try {
-    return await adspower.deleteProfiles(apiKey, profileIds);
-  } catch (error: any) {
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('adspower-list-app-categories', async (_event, apiKey) => {
-  try {
-    return await adspower.listApplicationCategories(apiKey);
   } catch (error: any) {
     return { error: error.message };
   }

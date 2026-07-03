@@ -1,12 +1,7 @@
 export interface ElectronAPI {
   getAppPath: () => Promise<string>;
   adspower: {
-    listProfiles: (apiKey: string) => Promise<any>;
-    createProfile: (apiKey: string, profileData: any) => Promise<any>;
-    getProfile: (apiKey: string, profileId: string) => Promise<any>;
-    updateProfile: (apiKey: string, profileId: string, data: any) => Promise<any>;
-    deleteProfiles: (apiKey: string, profileIds: string[]) => Promise<any>;
-    listAppCategories: (apiKey: string) => Promise<any>;
+    listProfiles: (apiKey: string) => Promise<unknown>;
   };
   db: {
     // Proxy Groups
@@ -47,10 +42,7 @@ export interface ElectronAPI {
   };
   crawler: {
     // 브라우저 준비 (DDD 패턴)
-    prepareBrowsers: (
-      apiKey: string,
-      profiles: Array<{ user_id: string; name: string }>
-    ) => Promise<{
+    prepareBrowsers: (apiKey: string) => Promise<{
       success: boolean;
       results?: Array<{
         success: boolean;

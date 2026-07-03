@@ -25,9 +25,11 @@ async function makeRequest(endpoint: string, apiKey: string, options: any = {}) 
 
 /**
  * 프로필 목록 조회
+ * groupId 지정 시 해당 AdsPower 그룹으로 스코프 (미지정 = 전체 그룹)
  */
-export async function listProfiles(apiKey: string, page = 1, pageSize = 100) {
-  return makeRequest(`/api/v1/user/list?page=${page}&page_size=${pageSize}`, apiKey);
+export async function listProfiles(apiKey: string, page = 1, pageSize = 100, groupId?: string) {
+  const groupParam = groupId ? `&group_id=${groupId}` : '';
+  return makeRequest(`/api/v1/user/list?page=${page}&page_size=${pageSize}${groupParam}`, apiKey);
 }
 
 /**
@@ -125,4 +127,33 @@ export async function listApplicationCategories(apiKey: string, page = 1, pageSi
   const result = await makeRequest(`/api/v1/application/list?page=${page}&page_size=${pageSize}`, apiKey);
   console.log('[AdsPower] App categories:', JSON.stringify(result.data?.list));
   return result;
+}
+
+/**
+ * 그룹 목록 조회
+ */
+export async function listGroups(apiKey: string, page = 1, pageSize = 100) {
+  return makeRequest(`/api/v1/group/list?page=${page}&page_size=${pageSize}`, apiKey);
+}
+
+/**
+ * 그룹 생성 → group_id 반환
+ */
+export async function createGroup(apiKey: string, groupName: string): Promise<string> {
+  const result = await makeRequest('/api/v1/group/create', apiKey, {
+    method: 'POST',
+    body: JSON.stringify({ group_name: groupName }),
+  });
+  return String(result.data?.group_id);
+}
+
+/**
+ * 프로필들을 지정 그룹으로 이동 (미분류 레거시 프로필 흡수용)
+ */
+export async function regroupProfiles(apiKey: string, userIds: string[], groupId: string) {
+  if (userIds.length === 0) return;
+  return makeRequest('/api/v1/user/regroup', apiKey, {
+    method: 'POST',
+    body: JSON.stringify({ user_ids: userIds, group_id: groupId }),
+  });
 }

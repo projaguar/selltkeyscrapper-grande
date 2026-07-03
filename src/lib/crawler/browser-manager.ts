@@ -11,6 +11,7 @@ import { CrawlerBrowser, type BrowserStatusInfo } from "./CrawlerBrowser";
 import { adsPowerQueue } from "./adspower-queue";
 import { getProxyPool } from "../proxy-pool";
 import * as adspower from "../../services/adspower";
+import { buildDesktopProfilePayload } from "./profile-pool";
 import * as db from "../../database/sqlite";
 
 // 프로필 정보
@@ -32,6 +33,7 @@ export interface PreparationResult {
 class BrowserManager {
   private browsers: Map<string, CrawlerBrowser> = new Map();
   private apiKey: string = "";
+  private groupId: string = "";
   /**
    * API Key 설정
    */
@@ -44,6 +46,17 @@ class BrowserManager {
    */
   getApiKey(): string {
     return this.apiKey;
+  }
+
+  /**
+   * scrapper 전용 AdsPower 그룹 ID 설정 (프로필 재생성 시 격리 유지)
+   */
+  setGroupId(groupId: string): void {
+    this.groupId = groupId;
+  }
+
+  getGroupId(): string {
+    return this.groupId;
   }
 
   /**
@@ -274,20 +287,7 @@ class BrowserManager {
     // 2. 새 프로필 생성 (AdsPower API - 큐를 통해 rate limit 준수)
     const createResult = await adsPowerQueue.enqueue(
       `createProfile ${profileName}`,
-      () => adspower.createProfile(this.apiKey, {
-        name: profileName,
-        group_id: '0',
-        fingerprint_config: {
-          language: ['ko-KR', 'ko', 'en-US', 'en'],
-          random_ua: {
-            ua_browser: ['chrome'],
-            ua_system_version: ['Windows 10', 'Windows 11', 'Mac OS X 12', 'Mac OS X 13'],
-          },
-        },
-        user_proxy_config: {
-          proxy_soft: 'no_proxy',
-        },
-      }),
+      () => adspower.createProfile(this.apiKey, buildDesktopProfilePayload(profileName, this.groupId)),
     );
     const newProfileId = createResult.data?.id;
     if (!newProfileId) {

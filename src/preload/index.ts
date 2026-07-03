@@ -8,11 +8,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AdsPower API 호출
   adspower: {
     listProfiles: (apiKey: string) => ipcRenderer.invoke('adspower-list-profiles', apiKey),
-    createProfile: (apiKey: string, profileData: any) => ipcRenderer.invoke('adspower-create-profile', apiKey, profileData),
-    getProfile: (apiKey: string, profileId: string) => ipcRenderer.invoke('adspower-get-profile', apiKey, profileId),
-    updateProfile: (apiKey: string, profileId: string, data: any) => ipcRenderer.invoke('adspower-update-profile', apiKey, profileId, data),
-    deleteProfiles: (apiKey: string, profileIds: string[]) => ipcRenderer.invoke('adspower-delete-profiles', apiKey, profileIds),
-    listAppCategories: (apiKey: string) => ipcRenderer.invoke('adspower-list-app-categories', apiKey),
   },
 
   // SQLite 데이터베이스
@@ -68,9 +63,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Crawler (DDD 패턴 - BrowserManager 사용)
   crawler: {
-    // 브라우저 준비 (프로필 목록으로 CrawlerBrowser 인스턴스 생성)
-    prepareBrowsers: (apiKey: string, profiles: Array<{ user_id: string; name: string }>) =>
-      ipcRenderer.invoke('crawler-prepare-browsers', apiKey, profiles),
+    // 브라우저 준비 (scrapper 그룹 풀에서 자동 확보)
+    prepareBrowsers: (apiKey: string) =>
+      ipcRenderer.invoke('crawler-prepare-browsers', apiKey),
 
     // 준비 진행 상황 이벤트 리스너
     onPrepareProgress: (callback: (data: { current: number; total: number; result: any }) => void) => {
