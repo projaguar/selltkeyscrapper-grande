@@ -1,11 +1,11 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 
 import { join } from 'path';
 import { readFileSync } from 'fs';
-import Database from 'better-sqlite3';
-import { homedir } from 'os';
+import { Database } from 'bun:sqlite';
+import { DATA_DIR } from '../src/data-dir';
 
-const DB_PATH = join(homedir(), 'Library/Application Support/scrapper/data.db');
+const DB_PATH = join(DATA_DIR, 'data.db');
 const PROXY_FILE = join(process.cwd(), '_resource/프록시유동_모모아이피.txt');
 
 interface Proxy {
@@ -45,7 +45,7 @@ function importProxies() {
 
   // Connect to database
   console.log('🗄️  Connecting to database:', DB_PATH);
-  const db = new Database(DB_PATH);
+  const db = new Database(DB_PATH, { create: true });
 
   // Prepare statement
   const stmt = db.prepare(`

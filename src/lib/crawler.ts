@@ -9,6 +9,7 @@
  */
 
 import * as os from "node:os";
+import { DATA_DIR } from "../data-dir";
 
 // 타입
 import type { CrawlTask, CrawlResult } from "./crawler/types";
@@ -35,8 +36,6 @@ import {
   incrementSkipped,
   registerBrowserStatusesGetter,
   unregisterBrowserStatusesGetter,
-  registerTaskQueueStatsGetter,
-  unregisterTaskQueueStatsGetter,
   setWaitState,
   clearWaitState,
 } from "./crawler/state";
@@ -811,14 +810,8 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   resetRestartStats();
   ipChangeInProgress = false;
 
-  // 재시작 로거 초기화 (userData/logs/restart-YYYY-MM-DD.tsv)
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { app } = require("electron");
-    initRestartLogger(app.getPath("userData"));
-  } catch {
-    // electron 미사용 환경에서는 무시
-  }
+  // 재시작 로거 초기화 (DATA_DIR/logs/restart-YYYY-MM-DD.tsv)
+  initRestartLogger(DATA_DIR);
 
   const browsers = browserManager.getBrowsers();
   const batchSize = browsers.length;
@@ -841,10 +834,6 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   registerBrowserStatusesGetter(() =>
     holders.map((h) => h.browser.getStatus()),
   );
-  registerTaskQueueStatsGetter(() => ({
-    completedCount: taskQueue.completedCount(),
-    failedCount: taskQueue.failedCount(),
-  }));
 
   try {
     // ========================================
@@ -894,7 +883,6 @@ export async function startCrawling(): Promise<CrawlResult[]> {
     // ========================================
     // 상태 조회 함수 해제
     unregisterBrowserStatusesGetter();
-    unregisterTaskQueueStatsGetter();
 
     // 브라우저는 닫지 않음 (BrowserManager가 관리)
     setRunning(false);

@@ -301,8 +301,6 @@ export interface CrawlerProgress {
 // CrawlerBrowser 배열을 외부에서 주입받아 상태 조회
 let browserStatusesGetter: (() => BrowserStatusInfo[]) | null = null;
 
-// TaskQueueManager 참조 (정확한 completed/failed 카운트용)
-let taskQueueStatsGetter: (() => { completedCount: number; failedCount: number }) | null = null;
 
 /**
  * 브라우저 상태 조회 함수 등록 (crawler.ts에서 호출)
@@ -318,19 +316,6 @@ export function unregisterBrowserStatusesGetter(): void {
   browserStatusesGetter = null;
 }
 
-/**
- * TaskQueue 통계 조회 함수 등록 (중복 카운트 방지)
- */
-export function registerTaskQueueStatsGetter(getter: () => { completedCount: number; failedCount: number }): void {
-  taskQueueStatsGetter = getter;
-}
-
-/**
- * TaskQueue 통계 조회 함수 해제
- */
-export function unregisterTaskQueueStatsGetter(): void {
-  taskQueueStatsGetter = null;
-}
 
 /**
  * 크롤링 진행 상태 조회 (DDD 패턴)

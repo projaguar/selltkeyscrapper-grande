@@ -76,8 +76,6 @@ export class CrawlerBrowser {
   private proxyId?: number;
   private proxyIp?: string;
   private proxyPort?: string;
-  private proxyUsername?: string;
-  private proxyPassword?: string;
 
   // Proxy Group 정보
   private proxyGroupId?: number;
@@ -136,8 +134,6 @@ export class CrawlerBrowser {
     this.proxyId = proxy.id;
     this.proxyIp = proxy.ip;
     this.proxyPort = proxy.port;
-    this.proxyUsername = proxy.username;
-    this.proxyPassword = proxy.password;
   }
 
   /**

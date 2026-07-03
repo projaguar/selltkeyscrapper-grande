@@ -1,6 +1,5 @@
 import { getProxyPool } from './proxy-pool';
 import * as adspower from '../services/adspower';
-import * as db from '../database/sqlite';
 
 interface Session {
   sessionId: string;
@@ -95,7 +94,7 @@ export class SessionManager {
     console.log(`[SessionManager] Loaded ${profiles.length} profiles from API`);
 
     // 기존 세션 중에서 현재 프로파일 목록에 없는 세션 제거
-    const currentProfileIds = new Set(profiles.map(p => p.user_id));
+    const currentProfileIds = new Set(profiles.map((p: { user_id: string }) => p.user_id));
     console.log(`[SessionManager] Current session count before cleanup: ${this.sessions.size}`);
     const sessionsToRemove: string[] = [];
 

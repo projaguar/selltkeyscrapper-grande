@@ -83,14 +83,13 @@ export interface ElectronAPI {
     getStatus: () => Promise<{ success: boolean; status?: any; error?: string }>;
 
     // 크롤러 진행 상태 조회 (상세)
-    getProgress: () => Promise<{ success: boolean; progress?: any; error?: string }>;
+    getProgress: () => Promise<{ success: boolean; progress?: unknown; readyBrowserCount?: number; error?: string }>;
   };
 }
-
-declare const __APP_VERSION__: string;
 
 declare global {
   interface Window {
     electronAPI: ElectronAPI;
   }
+  const __APP_VERSION__: string;
 }

@@ -12,20 +12,6 @@ interface ProxyGroup {
   in_use_count?: number;
 }
 
-interface Proxy {
-  id: number;
-  group_id: number;
-  ip: string;
-  port: string;
-  username?: string;
-  password?: string;
-  status: 'active' | 'dead' | 'in_use';
-  last_checked?: string;
-  fail_count: number;
-  success_count: number;
-  created_at: string;
-}
-
 function ProxyManager() {
   const { proxies, setProxies, deleteProxy, proxyGroups, setProxyGroups } = useStore();
 

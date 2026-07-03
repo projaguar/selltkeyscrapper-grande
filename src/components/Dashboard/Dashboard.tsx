@@ -63,14 +63,6 @@ interface CrawlerProgress {
   waitReason: string;
 }
 
-interface PreparationResult {
-  success: boolean;
-  profileId: string;
-  profileName: string;
-  proxyGroupName?: string;
-  proxyIp?: string;
-  error?: string;
-}
 
 function Dashboard() {
   const { apiKey, proxies } = useStore();
@@ -89,10 +81,10 @@ function Dashboard() {
       try {
         const result = await window.electronAPI.crawler.getProgress();
         if (result.success) {
-          setProgress(result.progress);
+          setProgress((result.progress ?? null) as CrawlerProgress | null);
           // 마운트 시 1회만 복원: 백엔드에 준비된 브라우저가 있으면 반영
-          if (isFirstFetch && result.readyBrowserCount > 0) {
-            setReadyBrowserCount(result.readyBrowserCount);
+          if (isFirstFetch && (result.readyBrowserCount ?? 0) > 0) {
+            setReadyBrowserCount(result.readyBrowserCount ?? 0);
           }
           isFirstFetch = false;
         }
@@ -258,22 +250,6 @@ function Dashboard() {
   const overallProgressPercent = progress && progress.totalTasks > 0
     ? Math.round((totalProcessed / progress.totalTasks) * 100)
     : 0;
-
-  // 브라우저 상태 아이콘
-  const getStatusIcon = (status: BrowserStatus) => {
-    switch (status) {
-      case 'crawling': return '🔄';
-      case 'success': return '✅';
-      case 'warning': return '⚠️';
-      case 'error': return '❌';
-      case 'waiting': return '⏳';
-      case 'recreating': return '🔁';
-      case 'reconnecting': return '🔌';
-      case 'restarting': return '🔄';
-      case 'preparing': return '🔧';
-      default: return '⬜';
-    }
-  };
 
   // 브라우저 상태 색상
   const getStatusColor = (status: BrowserStatus) => {

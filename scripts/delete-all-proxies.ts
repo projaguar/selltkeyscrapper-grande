@@ -1,10 +1,10 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 
 import { join } from 'path';
-import Database from 'better-sqlite3';
-import { homedir } from 'os';
+import { Database } from 'bun:sqlite';
+import { DATA_DIR } from '../src/data-dir';
 
-const DB_PATH = join(homedir(), 'Library/Application Support/scrapper/data.db');
+const DB_PATH = join(DATA_DIR, 'data.db');
 
 function deleteAllProxies() {
   console.log('🗑️  Connecting to database:', DB_PATH);

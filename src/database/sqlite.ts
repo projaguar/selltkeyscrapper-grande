@@ -1,11 +1,11 @@
-import Database from 'better-sqlite3';
+import { Database } from 'bun:sqlite';
 import { join } from 'path';
 
 let db: any = null;
 
 export function initDatabase(appPath: string) {
   const dbPath = join(appPath, 'data.db');
-  db = new Database(dbPath);
+  db = new Database(dbPath, { create: true });
 
   // 프록시 그룹 테이블 생성
   db.exec(`
