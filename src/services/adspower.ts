@@ -146,14 +146,3 @@ export async function createGroup(apiKey: string, groupName: string): Promise<st
   });
   return String(result.data?.group_id);
 }
-
-/**
- * 프로필들을 지정 그룹으로 이동 (미분류 레거시 프로필 흡수용)
- */
-export async function regroupProfiles(apiKey: string, userIds: string[], groupId: string) {
-  if (userIds.length === 0) return;
-  return makeRequest('/api/v1/user/regroup', apiKey, {
-    method: 'POST',
-    body: JSON.stringify({ user_ids: userIds, group_id: groupId }),
-  });
-}

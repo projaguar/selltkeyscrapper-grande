@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useStore } from '../../store';
 
 const DEFAULT_GROUP_NAME = 'scrapper';
-const DEFAULT_PROFILE_COUNT = 5;
+const DEFAULT_PROFILE_COUNT = 2;
 
 function profileCountFromList(result: unknown): number {
   if (result && typeof result === 'object' && 'data' in result) {

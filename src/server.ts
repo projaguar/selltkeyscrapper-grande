@@ -23,7 +23,7 @@ const PORT = Number(process.env.SCRAPPER_PORT ?? 4478); // prowler(4477)와 분�
 const UI_DIR = `${import.meta.dir}/../dist`;
 const HARDCODED_API_KEY = "268820ebcb76ffe2def2d28d04dfd4ae";
 const DEFAULT_GROUP_NAME = "scrapper";
-const DEFAULT_PROFILE_COUNT = 5;
+const DEFAULT_PROFILE_COUNT = 2;
 
 // ─── 초기화 ───
 mkdirSync(DATA_DIR, { recursive: true });

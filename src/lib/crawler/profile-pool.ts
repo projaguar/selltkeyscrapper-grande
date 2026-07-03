@@ -4,9 +4,10 @@
  * 역할:
  * - scrapper 전용 AdsPower 그룹 안에서만 프로필을 관리하여 prowler 등 타 앱 프로필과 격리
  * - 목표 개수(count)에 맞춰 풀 유지:
- *   1) 그룹 내 기존 프로필 재사용
- *   2) 부족하면 미분류(group 0) 레거시 프로필을 그룹으로 흡수(regroup) — 워밍업된 프로필 재활용
- *   3) 그래도 부족하면 데스크탑 지문으로 신규 생성
+ *   1) 그룹 내(=이 앱이 만든) 프로필 재사용
+ *   2) 부족하면 데스크탑 지문으로 신규 생성
+ * - ⚠️ 기존/미분류 프로필은 절대 건드리지 않는다(흡수/이동 없음). 오직 이 그룹 안에서만 생성/삭제.
+ * - 블록 시 삭제 → 그룹 내 재생성 (browser-manager).
  *
  * 사용자 개입(수동 생성/삭제 UI) 없이 동작한다.
  */
@@ -14,8 +15,6 @@
 import * as adspower from "../../services/adspower";
 import { adsPowerQueue } from "./adspower-queue";
 
-// group_id 가 "0" 또는 "" 이면 미분류 (AdsPower 기본)
-const UNGROUPED_IDS: Record<string, true> = { "0": true, "": true };
 
 export interface PoolProfile {
   user_id: string;
@@ -124,7 +123,7 @@ export class ProfilePool {
    * 반환: 사용 가능한 프로필 목록(최대 count 개). 한도 초과 등으로 count 미달 시 있는 만큼 반환.
    */
   async ensurePool(groupId: string, count: number): Promise<PoolProfile[]> {
-    // 1. 그룹 내 기존 프로필
+    // 그룹 내(이 앱이 만든) 기존 프로필
     const inGroupRes = await adsPowerQueue.enqueue("listProfiles(group)", () =>
       adspower.listProfiles(this.apiKey, 1, 100, groupId),
     );
@@ -136,28 +135,9 @@ export class ProfilePool {
     }
 
     const pool: PoolProfile[] = [...inGroup];
-    let need = count - inGroup.length;
+    const need = count - inGroup.length;
 
-    // 2. 미분류 레거시 프로필 흡수 (regroup)
-    const allRes = await adsPowerQueue.enqueue("listProfiles(all)", () =>
-      adspower.listProfiles(this.apiKey, 1, 100),
-    );
-    const ungrouped = extractProfiles(allRes).filter((p) => (p.group_id ?? "") in UNGROUPED_IDS);
-    const toAdopt = ungrouped.slice(0, need);
-    if (toAdopt.length > 0) {
-      try {
-        await adsPowerQueue.enqueue("regroup(adopt)", () =>
-          adspower.regroupProfiles(this.apiKey, toAdopt.map((p) => p.user_id), groupId),
-        );
-        console.log(`[ProfilePool] 미분류 레거시 프로필 ${toAdopt.length}개를 그룹으로 흡수`);
-        for (const p of toAdopt) pool.push({ user_id: p.user_id, name: p.name, group_id: groupId });
-        need -= toAdopt.length;
-      } catch (e) {
-        console.error(`[ProfilePool] 레거시 흡수 실패 (무시): ${errMsg(e)}`);
-      }
-    }
-
-    // 3. 부족분 신규 생성
+    // 부족분만큼 신규 생성 (기존 프로필은 절대 건드리지 않음)
     for (let i = 0; i < need; i++) {
       const name = `scrapper-${Date.now()}-${i}`;
       try {
