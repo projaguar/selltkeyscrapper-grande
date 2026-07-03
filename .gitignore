@@ -30,3 +30,6 @@ release
 *.njsproj
 *.sln
 *.sw?
+
+# oh my claude code
+.omc
