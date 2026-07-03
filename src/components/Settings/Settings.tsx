@@ -40,12 +40,17 @@ function Settings() {
 
   const handleSave = async () => {
     if (!window.electronAPI) return;
-    await window.electronAPI.settings.set('adspowerApiKey', localApiKey);
-    await window.electronAPI.settings.set('scrapperGroupName', groupName.trim() || DEFAULT_GROUP_NAME);
-    await window.electronAPI.settings.set('crawlProfileCount', String(profileCount));
-    setApiKey(localApiKey);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    try {
+      await window.electronAPI.settings.set('adspowerApiKey', localApiKey);
+      await window.electronAPI.settings.set('scrapperGroupName', groupName.trim() || DEFAULT_GROUP_NAME);
+      await window.electronAPI.settings.set('crawlProfileCount', String(profileCount));
+      setApiKey(localApiKey);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      alert(`설정 저장 실패\n${msg}`);
+    }
   };
 
   const handleTest = async () => {

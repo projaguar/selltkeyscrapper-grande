@@ -28,7 +28,7 @@ src/
 ├── lib/
 │   ├── crawler.ts       # 크롤 메인 루프 (Producer-Consumer)
 │   ├── crawler/
-│   │   ├── profile-pool.ts    # 그룹 격리 프로필 풀 (자동 생성/흡수/재생성)
+│   │   ├── profile-pool.ts    # 그룹 격리 프로필 풀 (그룹 내 생성/재사용/재생성)
 │   │   ├── browser-manager.ts # CrawlerBrowser 생명주기
 │   │   ├── CrawlerBrowser.ts
 │   │   └── ...

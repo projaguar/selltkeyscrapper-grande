@@ -28,9 +28,15 @@ const DEFAULT_PROFILE_COUNT = 2;
 // ─── 초기화 ───
 mkdirSync(DATA_DIR, { recursive: true });
 db.initDatabase(DATA_DIR);
-db.setSetting("adspowerApiKey", process.env.ADSPOWER_API_KEY ?? HARDCODED_API_KEY);
+// API 키: env 가 있으면 그것으로, 없고 DB 에도 없으면 하드코딩 시드 (UI 저장 키는 덮어쓰지 않음)
+const envKey = process.env.ADSPOWER_API_KEY;
+if (envKey) db.setSetting("adspowerApiKey", envKey);
+else if (!db.getSetting("adspowerApiKey")) db.setSetting("adspowerApiKey", HARDCODED_API_KEY);
 getProxyPool();
 console.log(`[server] DB: ${DATA_DIR}/data.db`);
+if (!(await Bun.file(`${UI_DIR}/index.html`).exists())) {
+  console.warn("[server] ⚠️ dist 빌드가 없습니다 — 대시보드가 안 뜹니다. 'bun run build' 를 먼저 실행하세요.");
+}
 
 // ─── WebSocket 브로드캐스트 (UI 진행 이벤트) ───
 const clients = new Set<ServerWebSocket<unknown>>();
@@ -102,8 +108,13 @@ async function prepareBrowsers(apiKey: string) {
     };
     const results = await browserManager.prepareBrowsers(profiles, onProgress);
     const successCount = results.filter((r) => r.success).length;
+    const warning =
+      profiles.length < count
+        ? `요청 ${count}개 중 ${profiles.length}개만 확보됨 (AdsPower 한도/rate-limit/연결 확인)`
+        : undefined;
+    if (warning) console.warn(`[server] ⚠️ ${warning}`);
     console.log(`[server] Preparation complete: ${successCount}/${profiles.length} ready`);
-    return { success: true, results, readyCount: successCount, requestedCount: count };
+    return { success: true, results, readyCount: successCount, requestedCount: count, warning };
   } catch (e) {
     console.error("[server] prepareBrowsers failed:", errMsg(e));
     return { success: false, error: errMsg(e) };
@@ -130,7 +141,7 @@ const handlers: Record<string, (args: unknown[]) => unknown | Promise<unknown>> 
   "db-delete-proxy": (a) => db.deleteProxy(n(a[0])),
   "db-delete-all-proxies": () => db.deleteAllProxies(),
   "db-delete-proxies-by-group": (a) => db.deleteProxiesByGroup(n(a[0])),
-  "db-bulk-add-proxies": (a) => db.bulkAddProxies(arr(a[0]), a[1] === undefined ? 1 : n(a[1])),
+  "db-bulk-add-proxies": (a) => db.bulkAddProxies(arr(a[0]), a[1] == null ? 1 : n(a[1])),
 
   // Settings
   "settings-get": (a) => db.getSetting(s(a[0])),
@@ -278,6 +289,7 @@ async function handleRpc(req: Request): Promise<Response> {
 
 const server = Bun.serve({
   port: PORT,
+  idleTimeout: 0, // 장시간 크롤 RPC(startBatch) 유지 — 기본 0이지만 방어적으로 고정
   async fetch(req, srv) {
     const url = new URL(req.url);
 
@@ -290,6 +302,7 @@ const server = Bun.serve({
 
     // 정적 파일 + SPA fallback
     const rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
+    if (rel.includes("..")) return new Response("not found", { status: 404 });
     const file = Bun.file(`${UI_DIR}/${rel}`);
     if (await file.exists()) return new Response(file);
     return new Response(Bun.file(`${UI_DIR}/index.html`));

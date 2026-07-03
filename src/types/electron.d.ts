@@ -53,6 +53,8 @@ export interface ElectronAPI {
         error?: string;
       }>;
       readyCount?: number;
+      requestedCount?: number;
+      warning?: string;
       error?: string;
     }>;
 

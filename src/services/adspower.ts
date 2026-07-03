@@ -144,5 +144,9 @@ export async function createGroup(apiKey: string, groupName: string): Promise<st
     method: 'POST',
     body: JSON.stringify({ group_name: groupName }),
   });
-  return String(result.data?.group_id);
+  const gid = result.data?.group_id;
+  if (gid == null || gid === '') {
+    throw new Error('AdsPower group/create 응답에 group_id 가 없습니다');
+  }
+  return String(gid);
 }

@@ -5,8 +5,8 @@
   "description": "selltkeyscrapper grande - AdsPower 브라우저 기반 네이버 크롤러 (Bun 데몬 + 웹 대시보드)",
   "type": "module",
   "scripts": {
-    "start": "bun run src/server.ts",
-    "dev": "bun run --watch src/server.ts",
+    "start": "vite build && bun run src/server.ts",
+    "dev": "vite build && bun run --watch src/server.ts",
     "dev:ui": "vite",
     "build": "vite build",
     "type-check": "tsc --noEmit",

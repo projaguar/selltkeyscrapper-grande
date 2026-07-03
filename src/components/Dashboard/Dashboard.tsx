@@ -170,8 +170,16 @@ function Dashboard() {
 
       if (result.success) {
         const successCount = result.readyCount || 0;
+        const requested = result.requestedCount ?? successCount;
         setReadyBrowserCount(successCount);
-        alert(`🎉 브라우저 준비 완료\n\n✅ 준비: ${successCount}개`);
+        if (result.warning || successCount < requested) {
+          alert(
+            `⚠️ 일부만 준비됨\n\n요청 ${requested}개 중 ${successCount}개 등록.\n${result.warning || 'AdsPower 한도/연결을 확인하세요.'}`,
+          );
+        } else {
+          // '준비'는 프로필 등록·프록시 그룹 배정까지. 실제 브라우저 기동은 크롤 시작 시.
+          alert(`✅ 브라우저 ${successCount}개 준비 완료\n(실제 기동은 크롤링 시작 시 수행)`);
+        }
       } else {
         alert(`❌ 브라우저 준비 실패\n${result.error || '알 수 없는 오류'}`);
       }
