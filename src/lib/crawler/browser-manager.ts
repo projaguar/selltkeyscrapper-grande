@@ -86,30 +86,12 @@ class BrowserManager {
       }));
     }
 
-    // 그룹별 브라우저 할당 계산
-    const groupAssignments: { groupId: number; groupName: string }[] = [];
-    let remainingBrowsers = profiles.length;
-    let groupIndex = 0;
-
-    while (remainingBrowsers > 0 && groupIndex < proxyGroups.length) {
-      const group = proxyGroups[groupIndex];
-      const assignCount = Math.min(group.max_browsers, remainingBrowsers);
-
-      for (let i = 0; i < assignCount; i++) {
-        groupAssignments.push({
-          groupId: group.id,
-          groupName: group.name,
-        });
-      }
-
-      remainingBrowsers -= assignCount;
-      groupIndex++;
-    }
-
-    // 그룹 할당 수가 프로필 수보다 적으면 초과 프로필은 스킵
-    if (remainingBrowsers > 0) {
-      console.log(`[BrowserManager] ${remainingBrowsers} profiles exceed group capacity, will be skipped`);
-    }
+    // 각 프로필을 프록시 그룹에 라운드로빈 배정 — 개수 제한 없이 profileCount 그대로 사용.
+    // (프록시 그룹 max_browsers 로 브라우저 수를 줄이지 않음: '동시 프로필 개수'가 유일한 상한)
+    const groupAssignments = profiles.map((_, i) => {
+      const group = proxyGroups[i % proxyGroups.length];
+      return { groupId: group.id, groupName: group.name };
+    });
 
     console.log(`[BrowserManager] Group assignments: ${groupAssignments.map((g) => g.groupName).join(", ")} (${groupAssignments.length}/${profiles.length})`);
 
@@ -159,22 +141,6 @@ class BrowserManager {
           onProgress(i, profiles.length, result);
         }
       }));
-    }
-
-    // 그룹 용량 초과로 할당되지 않은 프로필은 실패 처리
-    for (let i = groupAssignments.length; i < profiles.length; i++) {
-      const profile = profiles[i];
-      const skipResult: PreparationResult = {
-        success: false,
-        profileId: profile.user_id,
-        profileName: profile.name,
-        error: '그룹 최대 브라우저 수 초과',
-      };
-      results.push(skipResult);
-
-      if (onProgress) {
-        onProgress(i, profiles.length, skipResult);
-      }
     }
 
     const successCount = results.filter((r) => r.success).length;

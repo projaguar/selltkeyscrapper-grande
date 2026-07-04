@@ -144,6 +144,18 @@ function Settings() {
             크롤링에 사용할 프로필 수. 이 머신은 다른 앱과 AdsPower를 공유하므로 과도한 값은 피하세요.
           </p>
         </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleSave}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            저장
+          </button>
+          {saved && (
+            <span className="text-sm text-green-700">저장되었습니다.</span>
+          )}
+        </div>
       </div>
 
       <div className="max-w-2xl mt-6 p-4 bg-gray-50 rounded-lg">
