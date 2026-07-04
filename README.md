@@ -80,3 +80,19 @@ bun run start        # 또는 개발용: bun run dev (watch)
 
 `bun:sqlite` DB — 기본 경로는 기존 앱과 동일(`~/Library/Application Support/selltkeyscrapper-grande/data.db`),
 `SCRAPPER_DATA_DIR` 로 변경 가능. 프록시/설정을 보관한다.
+
+## 다른 사람이 실행 (배포)
+
+비개발자 운영자가 클릭 한 번으로 돌리도록 `start.command` 런처 제공(더블클릭 → sleep 방지 + UI 빌드 + 서버 + 대시보드 창 자동).
+
+**최초 1회 (대상 맥)**
+1. `bun` 설치: `curl -fsSL https://bun.sh/install | bash`
+2. 저장소 클론 후 `bun install`
+3. AdsPower 설치 + 로그인 + Local API on, 프록시 서비스에 그 맥의 공인 IP 화이트리스트 등록
+
+**매번 실행**
+- `start.command` 더블클릭 (또는 바탕화면에 이 파일의 **가명(Finder alias)** 을 만들어 두고 클릭).
+- 뜨는 터미널 창이 "가동 중" 표시 + 실시간 로그. **창을 닫으면 종료**.
+- 대시보드는 자동으로 Chrome 앱 창으로 열림(`http://localhost:4478`).
+
+> 리부팅에도 자동 재기동이 필요하면 launchd `LaunchAgent` 로 등록 가능(요청 시 추가).
