@@ -287,6 +287,7 @@ async function browserWorker(
       );
       // 예외 사유 분류: Cloudflare 차단 > 브라우저 죽음 > 타임아웃 > 네트워크 > 기타
       const isCloudflareBlock = errorMsg.includes("Cloudflare");
+      const isBlock = /캡차|차단|captcha|blocked/i.test(errorMsg);
       const isTimeout = /timeout|ETIMEDOUT|Timeout waiting/i.test(errorMsg);
       const isNetwork =
         /ECONNREFUSED|ECONNRESET|ENOTFOUND|net::ERR_|페이지 로드 실패|이동 실패|socket hang up/i.test(
@@ -294,13 +295,15 @@ async function browserWorker(
         );
       const skipReason = isCloudflareBlock
         ? "cloudflareBlock"
-        : isDeadBrowser
-          ? "deadBrowser"
-          : isTimeout
-            ? "timeout"
-            : isNetwork
-              ? "network"
-              : "exception";
+        : isBlock
+          ? "captcha"
+          : isDeadBrowser
+            ? "deadBrowser"
+            : isTimeout
+              ? "timeout"
+              : isNetwork
+                ? "network"
+                : "exception";
       incrementSkipped(1, skipReason);
 
       // 어떤 예외였는지 상세 로그 ('기타(exception)' 원인 추적용 - 메시지 + 스택)
@@ -348,6 +351,8 @@ async function browserWorker(
         "ETIMEDOUT",
         "Cloudflare block detected",
         "IP change needed",
+        "차단",
+        "캡차",
       ];
 
       const needsRestart = RESTART_ERROR_PATTERNS.some((pattern) =>
@@ -360,7 +365,7 @@ async function browserWorker(
         const cat = logRestart({ profileName, workerIndex, reason: errorMsg, errorMsg });
         incrementStat(cat);
 
-        if (cat === "BLOCKED") {
+        if (cat === "BLOCKED" || cat === "CAPTCHA") {
           // BLOCKED: 프로필 재생성 (새 fingerprint + 새 proxy)
           await handleBrowserRecreation(holder, workerIndex, `${cat}: ${errorMsg}`);
         } else {
@@ -1253,11 +1258,27 @@ async function navigateToTarget(
       throw new Error("Cloudflare block detected - IP change needed");
     }
   } else if (task.URLPLATFORMS === "NAVER") {
-    // Naver: window.__PRELOADED_STATE__ 존재 확인
+    // Naver: __PRELOADED_STATE__(데이터) OR 캡차/차단 지표를 함께 감시.
+    // 차단 시 30초 대기 없이 즉시 감지 → 재생성(새 지문+새 프록시) 경로로 보낸다.
+    let result: string;
     try {
-      await page.waitForFunction(() => !!(window as any).__PRELOADED_STATE__, {
-        timeout: 30000,
-      });
+      const waitResult = await page.waitForFunction(
+        () => {
+          const w = window as unknown as { __PRELOADED_STATE__?: unknown; _cf_chl_opt?: unknown };
+          if (w.__PRELOADED_STATE__) return "data";
+          const blocked =
+            !!document.querySelector('script[src*="wtm_captcha.js"]') ||
+            !!document.querySelector('iframe[src*="captcha"]') ||
+            !!document.querySelector(".captcha_container") ||
+            !!document.querySelector("#frmNIDLogin") ||
+            !!w._cf_chl_opt ||
+            document.title === "잠시만요..." ||
+            document.title === "Just a moment...";
+          return blocked ? "blocked" : false;
+        },
+        { timeout: 30000 },
+      );
+      result = String(await waitResult.jsonValue());
     } catch (waitErr: any) {
       // 데이터 대기 타임아웃 → 진단 정보 첨부
       const diag = await collectNavDiagnostics(page, navStart);
@@ -1265,8 +1286,12 @@ async function navigateToTarget(
       throw waitErr;
     }
     console.log(
-      `[Navigate] ${profileName} - data wait: ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
+      `[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
     );
+    if (result === "blocked") {
+      logBlocked("NAVER_CAPTCHA", profileName);
+      throw new Error("네이버 캡차/차단 감지 - 프로필 재생성 필요");
+    }
   }
 
   // 나머지 리소스 로딩 중단 (이미지, 광고, 트래킹 등) - 네이버는 제외 (블록 방지)
