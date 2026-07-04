@@ -975,7 +975,7 @@ async function preparePage(
         try {
           const backStart = Date.now();
           await Promise.all([
-            page.waitForNavigation({ waitUntil: "load", timeout: 30000 }),
+            page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
             page.goBack(),
           ]);
           if (isNaverMainUrl(page.url())) {
@@ -997,7 +997,7 @@ async function preparePage(
 
       if (!backOk) {
         await page.goto("https://www.naver.com/", {
-          waitUntil: "load",
+          waitUntil: "domcontentloaded",
           timeout: 60000,
         });
 
@@ -1187,9 +1187,11 @@ async function navigateToTarget(
         waitUntil: waitCondition,
         timeout: 60000,
       }),
-      page.click(`#${uniqueId}`, {
-        delay: Math.floor(Math.random() * 50) + 30,
-      }),
+      // CDP 마우스 클릭(page.click)은 일부 AdsPower SunBrowser 버전에서 액추에이트 안 됨 →
+      // 주입 앵커를 DOM 클릭(el.click())으로 직접 이동 (버전/좌표/오버레이 무관, prowler 검증)
+      page.evaluate((id: string) => {
+        document.getElementById(id)?.click();
+      }, uniqueId),
     ]);
   } catch (navErr: any) {
     // 타임아웃/네비게이션 실패 → 원인 진단 정보를 에러에 첨부 (skip-error 로그로 전달됨)
