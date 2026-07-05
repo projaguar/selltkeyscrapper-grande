@@ -24,6 +24,9 @@ import { getBrowserManager } from "./crawler/browser-manager";
 // Task Queue Manager
 import { TaskQueueManager } from "./crawler/task-queue";
 
+// AdsPower 큐 (자기 프로필 개별 종료용 — 정적 import)
+import { adsPowerQueue } from "./crawler/adspower-queue";
+
 // 상태 관리 (UI용)
 import {
   shouldStop,
@@ -646,16 +649,20 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
     holder.browser.disconnectOnly();
   }
 
-  // AdsPower V2 API로 모든 브라우저 한 번에 종료
+  // AdsPower 브라우저 종료 — 자기 프로필만 개별 종료(공유 AdsPower 에서 타 앱 브라우저 보호).
+  //  ⚠️ 인스턴스 전체 stop-all(/api/v2/.../stop-all)은 prowler 등 다른 앱 브라우저까지 끄므로 사용 금지.
   const apiKey = holders[0]?.browser.getApiKey();
   if (apiKey) {
-    try {
-      const { adsPowerQueue } = await import("./crawler/adspower-queue");
-      await adsPowerQueue.stopAllBrowsers(apiKey);
-      console.log(`[IPChange] All browsers stopped via batch API`);
-    } catch (e: any) {
-      console.log(`[IPChange] Batch stop API failed (개별 진행): ${e.message}`);
-    }
+    await Promise.all(
+      holders.map((h) =>
+        adsPowerQueue
+          .stopBrowser(apiKey, h.browser.getProfileId())
+          .catch((e) =>
+            console.log(`[IPChange] stop 실패 ${h.browser.getProfileId()} (무시): ${e instanceof Error ? e.message : String(e)}`),
+          ),
+      ),
+    );
+    console.log(`[IPChange] ${holders.length}개 브라우저 개별 종료 (자기 프로필만)`);
   }
 
   // 브라우저들이 완전히 종료될 때까지 잠시 대기

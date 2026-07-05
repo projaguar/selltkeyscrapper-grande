@@ -1,4 +1,5 @@
-const ADSPOWER_API = 'http://local.adspower.net:50325';
+// AdsPower base URL — env(ADSPOWER_BASE_URL)로 브로커 경유 가능. 미설정 시 직결.
+const ADSPOWER_API = process.env.ADSPOWER_BASE_URL ?? 'http://local.adspower.net:50325';
 
 async function makeRequest(endpoint: string, apiKey: string, options: any = {}) {
   const url = `${ADSPOWER_API}${endpoint}`;
