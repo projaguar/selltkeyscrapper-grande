@@ -62,6 +62,29 @@ bun run start        # vite build + 서버 (권장, 상시 가동)
 - **비개발자 운영자**: `start.command` 더블클릭 (바탕화면엔 이 파일의 **Finder 가명(alias)** 을 두고 클릭 — 복사 아님).
   - 뜨는 터미널 창 = "가동 중" 표시 + 실시간 로그. **창을 닫으면 종료**. 대시보드는 자동으로 Chrome 앱 창으로 열림.
 - **UI만 개발**: `bun run dev:ui` (Vite HMR, `/api`·`/ws`는 서버로 프록시).
+- **재부팅 후 자동 실행 (권장, 상시 운영)**: macOS `launchd` LaunchAgent.
+  - 파일: `~/Library/LaunchAgents/com.selltkey.scrapper.plist` → `scripts/launchd-run.sh` 실행.
+  - `RunAtLoad`(로그인/재부팅 시 자동 시작) + `KeepAlive`(크래시/종료 시 자동 재시작) + `caffeinate -s`(sleep 방지). 터미널 창 불필요.
+  - 로그: `~/Library/Logs/selltkey-scrapper.{out,err}.log`.
+  - **의존성 — AdsPower 자동 시작**: Local API(:50325)는 **`AdsPower Global`** 이 서비스한다(스크래퍼가 붙는 대상). macOS **로그인 항목**에 등록해야 재부팅 후 자동 실행됨. (`AdsPower Scrapper`도 현재 상태 재현용으로 함께 등록.)
+    ```bash
+    # 로그인 항목 등록 (등록됨: RunCat, AdsPower Global, AdsPower Scrapper)
+    osascript -e 'tell application "System Events" to make new login item at end with properties {path:"/Applications/AdsPower Global.app", hidden:false}'
+    osascript -e 'tell application "System Events" to get the name of every login item'   # 확인
+    osascript -e 'tell application "System Events" to delete login item "AdsPower Scrapper"'  # 해제 예시
+    ```
+  - **CLI로 안 되는 필수 설정(앱 내부에서 직접)**: AdsPower **계정 자동 로그인** 유지(로그인 화면에서 안 멈추게) + **Local API on**. 이게 꺼져 있으면 앱만 떠도 크롤 실패.
+  - **완전 무인 운영**: 시스템 설정 → 사용자 및 그룹 → **자동 로그인** 켜야 재부팅 후 로그인 세션이 떠서 위 전부가 시작됨.
+  - **크롤 자동 시작 (`SCRAPPER_AUTOSTART=1`)**: plist `EnvironmentVariables` 에 설정됨. 서버 부팅 시 UI 의 **"브라우저 준비" → "크롤링 시작"** 두 단계를 코드가 자동 수행(`src/server.ts` `autoStart()`). AdsPower Local API 가 응답할 때까지 최대 120s 대기 후 진행하고, 실패하면 로그만 남기고 서버는 유지(대시보드에서 수동 시작 가능). API 키·그룹명·개수는 DB 설정값에서 자동 획득 → **사람 입력 0**. 크래시 `KeepAlive` 재시작 시에도 자동 재개됨. 자동 크롤을 끄려면 plist 에서 이 변수를 제거 후 재적용.
+  ```bash
+  # 최초 등록 (또는 plist 수정 후 재적용)
+  launchctl bootout gui/$(id -u)/com.selltkey.scrapper 2>/dev/null || true
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.selltkey.scrapper.plist
+  # 상태/수동 재시작/중지
+  launchctl print gui/$(id -u)/com.selltkey.scrapper | grep -E 'state|pid|runs'
+  launchctl kickstart -k gui/$(id -u)/com.selltkey.scrapper   # 재시작
+  launchctl bootout gui/$(id -u)/com.selltkey.scrapper        # 자동실행 해제
+  ```
 
 ---
 

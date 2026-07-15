@@ -339,3 +339,44 @@ async function shutdown(): Promise<void> {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// ─── 부팅 시 자동 크롤 시작 (SCRAPPER_AUTOSTART=1 일 때만) ───
+// UI 의 "브라우저 준비" → "크롤링 시작" 두 단계를 서버 기동 시 코드가 대신 수행.
+// AdsPower 가 늦게 뜨는 경우를 대비해 Local API 가 응답할 때까지 대기 후 진행.
+async function waitForAdsPower(apiKey: string, timeoutMs = 120_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await adspower.listGroups(apiKey); // code!==0 이면 throw
+      return true;
+    } catch {
+      await Bun.sleep(3000); // API 아직 안 뜸 — 재시도
+    }
+  }
+  return false;
+}
+
+async function autoStart(): Promise<void> {
+  if (process.env.SCRAPPER_AUTOSTART !== "1") return;
+  const apiKey = settingStr("adspowerApiKey", HARDCODED_API_KEY);
+  console.log("[autostart] SCRAPPER_AUTOSTART=1 — AdsPower Local API 대기 중...");
+  if (!(await waitForAdsPower(apiKey))) {
+    console.error("[autostart] ❌ AdsPower Local API 미응답(120s) — 자동 시작 취소. 대시보드에서 수동 시작 가능.");
+    return;
+  }
+  console.log("[autostart] AdsPower 준비됨 — 브라우저 준비 중...");
+  const prep = await prepareBrowsers(apiKey);
+  if (!prep.success) {
+    console.error(`[autostart] ❌ 브라우저 준비 실패 — 자동 시작 취소: ${prep.error ?? ""}`);
+    return;
+  }
+  console.log(`[autostart] 브라우저 준비 완료 (ready=${prep.readyCount ?? "?"}) — 크롤링 시작`);
+  try {
+    await startCrawling();
+    console.log("[autostart] ✅ 크롤링 자동 시작/완료");
+  } catch (e) {
+    console.error(`[autostart] ❌ 크롤링 시작 실패: ${errMsg(e)}`);
+  }
+}
+
+void autoStart();
