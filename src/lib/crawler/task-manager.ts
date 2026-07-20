@@ -20,6 +20,7 @@ import {
   getInsertUrl,
 } from "./state";
 import { getUrlList } from "../../services/api";
+import { withOpennestAuth } from "../../services/opennest";
 import { logTransmitFail } from "./restart-logger";
 
 /**
@@ -144,10 +145,10 @@ export async function postGoodsList(payload: any, platform: string): Promise<{su
 
     const response = await fetch(url, {
       method: "POST",
-      headers: {
+      headers: withOpennestAuth({
         "Content-Type": "application/json",
         "Content-Encoding": "gzip",
-      },
+      }),
       body: compressed,
     });
 
