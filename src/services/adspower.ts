@@ -68,23 +68,28 @@ async function makeRequest(endpoint: string, apiKey: string, options: AdsRequest
       continue;
     }
 
-    if (response.status === 502 || response.status === 503) {
+    // 499: 클라이언트 취소(앱 abort 시만) — 재시도 안 함.
+    if (response.status === 499) {
+      throw new BrokerError('AdsPower broker 499: 클라이언트 취소', 499);
+    }
+    // 5xx: 브로커/업스트림 장애(502/503/504/500 등) — 완만 백오프 후 재시도.
+    //  브로커가 이미 재시도/스페이싱하므로 공격적 재호출은 증폭 루프 → 백오프 필수.
+    //  503(셰딩)/504(게이트웨이 타임아웃)은 더 길게 백오프.
+    if (response.status >= 500) {
       const body = await response.text().catch(() => '');
-      const kind = response.status === 503 ? 'overloaded(shed)' : 'upstream exhausted';
-      lastErr = new BrokerError(`AdsPower broker ${response.status} (${kind}): ${body}`, response.status);
+      const slow = response.status === 503 || response.status === 504;
+      lastErr = new BrokerError(`AdsPower broker ${response.status}: ${body}`, response.status);
       if (noRetry || attempt >= maxAttempts) throw lastErr;
-      // 503(셰딩)은 더 길게 백오프
-      const backoff = BROKER_BACKOFF_MS * attempt + (response.status === 503 ? 2_000 : 0);
+      const backoff = BROKER_BACKOFF_MS * attempt + (slow ? 2_000 : 0);
       console.log(`[AdsPower] 브로커 ${response.status} — ${backoff}ms 후 재시도(${attempt}/${maxAttempts}): ${endpoint}`);
       await sleep(backoff);
       continue;
     }
-    if (response.status === 499) {
-      // 클라이언트 취소(앱 abort 시만) — 재시도 안 함.
-      throw new BrokerError('AdsPower broker 499: 클라이언트 취소', 499);
-    }
 
-    const result = await response.json();
+    // 2xx/4xx: JSON 파싱(비 JSON body 방어). 파싱 실패는 상태코드를 담아 명확히 throw.
+    const result = await response.json().catch(() => {
+      throw new BrokerError(`AdsPower broker ${response.status}: JSON 파싱 실패`, response.status);
+    });
     // AdsPower API returns { code: 0, msg: "success", data: {...} } on success
     if (result.code !== 0) {
       throw new Error(`AdsPower API error: ${result.msg || 'Unknown error'} (code: ${result.code})`);

@@ -497,6 +497,11 @@ async function handleBrowserRecreation(
     // 1. 프로필 재생성 (AdsPower: 구 삭제 + 신 생성)
     const newBrowser = await browserManager.recreateProfile(oldBrowser);
 
+    // holder 를 새 인스턴스로 즉시 교체: 이후 프록시 설정/시작이 broker 로 실패해도
+    // worker·폴백(handleBrowserRestart)이 삭제된 구 프로필이 아니라 유효한 새 프로필을
+    // 사용하게 하여 '삭제된 프로필 무한 재시작 + 프록시 누수' 를 방지한다.
+    holder.browser = newBrowser;
+
     // 2. 새 프록시 할당
     const newProxy =
       groupId !== undefined
@@ -509,7 +514,6 @@ async function handleBrowserRecreation(
         "error",
         `No available proxies in group ${groupName || "default"}`,
       );
-      holder.browser = newBrowser;
       return;
     }
 
@@ -520,9 +524,6 @@ async function handleBrowserRecreation(
       validateProxy: false,
       validateConnection: false,
     });
-
-    // 4. holder 참조 교체 (worker가 새 인스턴스 사용)
-    holder.browser = newBrowser;
 
     console.log(
       `[Worker ${workerIndex}] ${profileName} - ✓ 프로필 재생성 완료 (${newBrowser.getProfileId()}) proxy: ${newProxy.ip}:${newProxy.port}`,

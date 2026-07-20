@@ -152,14 +152,16 @@ export class CrawlerBrowser {
       open_urls: ['https://www.naver.com'],
     };
 
+    // 소유권 즉시 기록: broker updateProfile 이 502/503/504/timeout 으로 실패해도
+    // 이 프록시는 이 브라우저 소유로 남는다 → 호출자(handleBrowserRestart/changeAllBrowserIPs)의
+    // 다음-시도 release(getProxyId) 가 정확히 이 프록시를 반환하여 in_use 풀 누수를 막는다.
+    this.assignProxy(proxy);
+
     // 큐를 통해 rate limit 준수
     await adsPowerQueue.enqueue(
       `updateProfile ${this.profileId}`,
       () => adspower.updateProfile(this.apiKey, this.profileId, updateData),
     );
-
-    // 성공 시 메모리 업데이트
-    this.assignProxy(proxy);
   }
 
   /**
@@ -195,11 +197,11 @@ export class CrawlerBrowser {
     try {
       // 1. AdsPower API로 브라우저 시작 (큐를 통해 rate limit 준수)
       //    browser/start 는 브로커가 재시도하지 않음 → 맹목적 재호출 금지.
-      //    브로커 502/타임아웃이면 실제로 기동됐을 수 있어 상태 확인 후 기존 인스턴스 채택.
+      //    브로커 5xx/타임아웃이면 실제로 기동됐을 수 있어 상태 확인 후 기존 인스턴스 채택.
       const result = await adsPowerQueue
         .startBrowser(this.apiKey, this.profileId)
         .catch((e: unknown) => {
-          if (e instanceof adspower.BrokerError && (e.status === 502 || e.status === 0)) {
+          if (e instanceof adspower.BrokerError && (e.status >= 500 || e.status === 0)) {
             return adsPowerQueue.enqueue(
               `active ${this.profileId}`,
               () => adspower.checkBrowserStatus(this.apiKey, this.profileId),
