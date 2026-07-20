@@ -12,8 +12,12 @@ interface AdsRequestOptions {
   method?: string;
   body?: string;
   headers?: Record<string, string>;
-  // browser/start 처럼 브로커가 재시도하지 않는 비멱등 호출 → 앱도 재시도 금지.
+  // 재시도 완전 금지(1회만). 예: browser/start — GET 이라 브로커는 재시도하지만(멱등, 기존 ws 반환),
+  // 앱은 별도 status 확인으로 대체하므로 여기선 재시도하지 않는다.
   noRetry?: boolean;
+  // 비멱등 쓰기(user/create 등): 503 셰딩(업스트림 미실행 확실)에서만 재시도하고,
+  // 502/네트워크/타임아웃(실행 여부 불명)에는 재시도하지 않는다 → 중복 생성 방지.
+  nonIdempotent?: boolean;
 }
 
 /** ads broker HTTP 상태코드를 담는 에러(502/503/499, 0=네트워크/타임아웃). */
@@ -43,7 +47,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function makeRequest(endpoint: string, apiKey: string, options: AdsRequestOptions = {}) {
   const url = `${ADSPOWER_API}${endpoint}`;
-  const { noRetry, headers: extraHeaders, ...fetchOptions } = options;
+  const { noRetry, nonIdempotent, headers: extraHeaders, ...fetchOptions } = options;
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
@@ -63,7 +67,7 @@ async function makeRequest(endpoint: string, apiKey: string, options: AdsRequest
     } catch (e: unknown) {
       // 네트워크/타임아웃 — 완만 재시도(비멱등은 noRetry 로 1회만)
       lastErr = new BrokerError(`AdsPower broker 연결 실패: ${e instanceof Error ? e.message : String(e)}`, 0);
-      if (noRetry || attempt >= maxAttempts) throw lastErr;
+      if (noRetry || nonIdempotent || attempt >= maxAttempts) throw lastErr; // 비멱등: 네트워크/타임아웃은 실행 여부 불명 → 재시도 금지
       await sleep(BROKER_BACKOFF_MS * attempt);
       continue;
     }
@@ -79,7 +83,8 @@ async function makeRequest(endpoint: string, apiKey: string, options: AdsRequest
       const body = await response.text().catch(() => '');
       const slow = response.status === 503 || response.status === 504;
       lastErr = new BrokerError(`AdsPower broker ${response.status}: ${body}`, response.status);
-      if (noRetry || attempt >= maxAttempts) throw lastErr;
+      const retryable = !noRetry && !(nonIdempotent && response.status !== 503); // 비멱등은 503(미실행 확실)만 재시도
+      if (!retryable || attempt >= maxAttempts) throw lastErr;
       const backoff = BROKER_BACKOFF_MS * attempt + (slow ? 2_000 : 0);
       console.log(`[AdsPower] 브로커 ${response.status} — ${backoff}ms 후 재시도(${attempt}/${maxAttempts}): ${endpoint}`);
       await sleep(backoff);
@@ -116,6 +121,7 @@ export async function createProfile(apiKey: string, profileData: any) {
   const result = await makeRequest('/api/v1/user/create', apiKey, {
     method: 'POST',
     body: JSON.stringify(profileData),
+    nonIdempotent: true, // 브로커가 비멱등 POST 를 재시도하지 않음 → 앱도 중복 생성 방지(503 제외 무재시도)
   });
   console.log('[AdsPower] createProfile response:', JSON.stringify(result.data));
   return result;
