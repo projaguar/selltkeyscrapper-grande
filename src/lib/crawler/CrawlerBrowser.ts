@@ -194,7 +194,19 @@ export class CrawlerBrowser {
 
     try {
       // 1. AdsPower API로 브라우저 시작 (큐를 통해 rate limit 준수)
-      const result = await adsPowerQueue.startBrowser(this.apiKey, this.profileId);
+      //    browser/start 는 브로커가 재시도하지 않음 → 맹목적 재호출 금지.
+      //    브로커 502/타임아웃이면 실제로 기동됐을 수 있어 상태 확인 후 기존 인스턴스 채택.
+      const result = await adsPowerQueue
+        .startBrowser(this.apiKey, this.profileId)
+        .catch((e: unknown) => {
+          if (e instanceof adspower.BrokerError && (e.status === 502 || e.status === 0)) {
+            return adsPowerQueue.enqueue(
+              `active ${this.profileId}`,
+              () => adspower.checkBrowserStatus(this.apiKey, this.profileId),
+            );
+          }
+          throw e;
+        });
 
       // AdsPower returns { code: 0, data: { ws: { puppeteer: "ws://..." }, ... } }
       const wsEndpoint = result.data?.ws?.puppeteer;
@@ -264,7 +276,7 @@ export class CrawlerBrowser {
 
   /**
    * Puppeteer 연결만 해제 (AdsPower API 호출 없이)
-   * 일괄 종료 시 사용: API는 별도로 stopAllBrowsers()로 한 번에 처리
+   * 일괄 종료 시 사용: AdsPower stop 은 호출자가 프로필별로 개별 처리한다.
    */
   disconnectOnly(): void {
     if (this.browser) {

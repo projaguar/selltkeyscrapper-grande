@@ -1,27 +1,97 @@
-// AdsPower base URL — env(ADSPOWER_BASE_URL)로 브로커 경유 가능. 미설정 시 직결.
-const ADSPOWER_API = process.env.ADSPOWER_BASE_URL ?? 'http://local.adspower.net:50325';
+// AdsPower base URL — env(ADSPOWER_BASE_URL)로 ads broker 경유. 미설정 시 브로커 기본값.
+const ADSPOWER_API = process.env.ADSPOWER_BASE_URL ?? 'http://127.0.0.1:50326/ads';
 
-async function makeRequest(endpoint: string, apiKey: string, options: any = {}) {
+// ads broker 통신 파라미터
+// - 타임아웃 90s: 브로커 GET 최악 ≈66s + 슬롯 대기 여유. 70s 미만 금지(브로커 재시도 전 잘림).
+const BROKER_TIMEOUT_MS = 90_000;
+// - 502/503 재시도는 완만하게: 브로커가 이미 재시도/스페이싱하므로 공격적 재호출은 증폭 루프.
+const BROKER_MAX_ATTEMPTS = 3;
+const BROKER_BACKOFF_MS = 3_000;
+
+interface AdsRequestOptions {
+  method?: string;
+  body?: string;
+  headers?: Record<string, string>;
+  // browser/start 처럼 브로커가 재시도하지 않는 비멱등 호출 → 앱도 재시도 금지.
+  noRetry?: boolean;
+}
+
+/** ads broker HTTP 상태코드를 담는 에러(502/503/499, 0=네트워크/타임아웃). */
+export class BrokerError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'BrokerError';
+    this.status = status;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+}
+
+/**
+ * ads broker / AdsPower 공용 요청.
+ * 브로커 상태코드(모두 body {code:-1,msg}):
+ *  - 502 업스트림 재시도 소진 → 완만 백오프 후 재시도
+ *  - 503 과부하 셰딩 → 더 긴 백오프 후 재시도(즉시 재호출 금지)
+ *  - 499 클라이언트 취소(앱 abort 시만) → 재시도 안 함
+ * AdsPower 앱 에러는 HTTP 200 + {code:-1} 로 오므로 HTTP 상태코드로 브로커/앱을 구분한다.
+ * API 키는 브로커가 Authorization 을 주입하므로 여기 Bearer 는 무시된다(호환용 유지).
+ */
+async function makeRequest(endpoint: string, apiKey: string, options: AdsRequestOptions = {}) {
   const url = `${ADSPOWER_API}${endpoint}`;
-  const headers = {
+  const { noRetry, headers: extraHeaders, ...fetchOptions } = options;
+  const headers: Record<string, string> = {
     'Authorization': `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
-    ...options.headers,
+    ...extraHeaders,
   };
+  const maxAttempts = noRetry ? 1 : BROKER_MAX_ATTEMPTS;
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let lastErr: BrokerError | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...fetchOptions,
+        headers,
+        signal: AbortSignal.timeout(BROKER_TIMEOUT_MS),
+      });
+    } catch (e: unknown) {
+      // 네트워크/타임아웃 — 완만 재시도(비멱등은 noRetry 로 1회만)
+      lastErr = new BrokerError(`AdsPower broker 연결 실패: ${e instanceof Error ? e.message : String(e)}`, 0);
+      if (noRetry || attempt >= maxAttempts) throw lastErr;
+      await sleep(BROKER_BACKOFF_MS * attempt);
+      continue;
+    }
 
-  const result = await response.json();
+    if (response.status === 502 || response.status === 503) {
+      const body = await response.text().catch(() => '');
+      const kind = response.status === 503 ? 'overloaded(shed)' : 'upstream exhausted';
+      lastErr = new BrokerError(`AdsPower broker ${response.status} (${kind}): ${body}`, response.status);
+      if (noRetry || attempt >= maxAttempts) throw lastErr;
+      // 503(셰딩)은 더 길게 백오프
+      const backoff = BROKER_BACKOFF_MS * attempt + (response.status === 503 ? 2_000 : 0);
+      console.log(`[AdsPower] 브로커 ${response.status} — ${backoff}ms 후 재시도(${attempt}/${maxAttempts}): ${endpoint}`);
+      await sleep(backoff);
+      continue;
+    }
+    if (response.status === 499) {
+      // 클라이언트 취소(앱 abort 시만) — 재시도 안 함.
+      throw new BrokerError('AdsPower broker 499: 클라이언트 취소', 499);
+    }
 
-  // AdsPower API returns { code: 0, msg: "success", data: {...} } on success
-  if (result.code !== 0) {
-    throw new Error(`AdsPower API error: ${result.msg || 'Unknown error'} (code: ${result.code})`);
+    const result = await response.json();
+    // AdsPower API returns { code: 0, msg: "success", data: {...} } on success
+    if (result.code !== 0) {
+      throw new Error(`AdsPower API error: ${result.msg || 'Unknown error'} (code: ${result.code})`);
+    }
+    return result;
   }
-
-  return result;
+  throw lastErr ?? new BrokerError('AdsPower broker: 재시도 소진', 0);
 }
 
 /**
@@ -67,7 +137,7 @@ export async function deleteProfile(apiKey: string, profileId: string) {
  * 브라우저 시작 (WebSocket URL 반환)
  */
 export async function startBrowser(apiKey: string, profileId: string) {
-  return makeRequest(`/api/v1/browser/start?user_id=${profileId}&ip_tab=0`, apiKey);
+  return makeRequest(`/api/v1/browser/start?user_id=${profileId}&ip_tab=0`, apiKey, { noRetry: true });
 }
 
 /**
@@ -75,23 +145,6 @@ export async function startBrowser(apiKey: string, profileId: string) {
  */
 export async function stopBrowser(apiKey: string, profileId: string) {
   return makeRequest(`/api/v1/browser/stop?user_id=${profileId}`, apiKey);
-}
-
-/**
- * 모든 브라우저 일괄 종료 (V2 API)
- * 기기에서 활성화된 모든 프로필을 한 번에 종료
- */
-export async function stopAllBrowsers(apiKey: string) {
-  const url = `${ADSPOWER_API}/api/v2/browser-profile/stop-all`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({}),
-  });
-  return response.json();
 }
 
 /**
