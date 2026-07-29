@@ -177,6 +177,66 @@ let currentRunId = 0;
 /** 리컨실 주기. IP 교체 경로에 의존하지 않는 독립 타이머여야 고갈 상태에서도 self-heal 이 돈다 */
 const RECONCILE_INTERVAL_MS = 60_000;
 
+/**
+ * 불변식 관측 표면 (REDESIGN §10-5).
+ *
+ * 365일 무인 운영에서는 "지금 건강한가"를 로그 tail 없이 한 번에 볼 수 있어야 한다.
+ * 특히 보류(parked/zombie) 수와 브레이커 상태, lease 잔고는 조용한 열화를 드러내는 신호다.
+ * 누적 카운터는 프로세스 수명 동안 유지되어 추세를 보여준다.
+ */
+export interface CrawlerHealth {
+  runId: number;
+  isRunning: boolean;
+  browsers: { total: number; ready: number; parked: number; zombie: number };
+  breaker: "closed" | "open" | "half-open";
+  lockPending: number;
+  proxies: { total: number; available: number; leased: number };
+  cumulative: {
+    reclaimedLeases: number;
+    reclaimedProfiles: number;
+    parks: number;
+    zombies: number;
+  };
+}
+
+let cumulativeReclaimedLeases = 0;
+let cumulativeReclaimedProfiles = 0;
+let cumulativeParks = 0;
+let cumulativeZombies = 0;
+/** 실행 중에만 등록된다. 미등록이면 브라우저 집계 없이 풀/브레이커만 보고한다. */
+let holdersSnapshot: (() => readonly BrowserHolder[]) | null = null;
+
+export function getCrawlerHealth(): CrawlerHealth {
+  const pool = getProxyPool();
+  const holders = holdersSnapshot?.() ?? [];
+  let ready = 0;
+  let parked = 0;
+  let zombie = 0;
+  for (const holder of holders) {
+    if (holder.suspended === "parked") parked++;
+    else if (holder.suspended === "zombie") zombie++;
+    else if (holder.browser.isReady()) ready++;
+  }
+  return {
+    runId: currentRunId,
+    isRunning: isRunning(),
+    browsers: { total: holders.length, ready, parked, zombie },
+    breaker: adsPowerQueue.breakerState(),
+    lockPending: getLifecycleLock().pendingKeys(),
+    proxies: {
+      total: pool.poolSize(),
+      available: pool.availableCount(),
+      leased: pool.leasedCount(),
+    },
+    cumulative: {
+      reclaimedLeases: cumulativeReclaimedLeases,
+      reclaimedProfiles: cumulativeReclaimedProfiles,
+      parks: cumulativeParks,
+      zombies: cumulativeZombies,
+    },
+  };
+}
+
 // 브라우저 죽음을 감지하는 에러 패턴
 const DEAD_BROWSER_PATTERNS = [
   "Browser not available",
@@ -467,6 +527,10 @@ function noteFailure(holder: BrowserHolder, workerIndex: number, error: unknown,
 
 /** 슬롯을 보류시킨다. 종점이 아니라 재활 대기 상태다. */
 function suspendHolder(holder: BrowserHolder, kind: "parked" | "zombie", detail: string): void {
+  if (holder.suspended !== kind) {
+    if (kind === "parked") cumulativeParks++;
+    else cumulativeZombies++;
+  }
   holder.suspended = kind;
   holder.nextAttemptAt = Date.now() + REHAB_INTERVAL_MS;
   const label = kind === "zombie" ? "정지 미확인 격리" : "보류";
@@ -653,11 +717,12 @@ async function reconcileResources(holders: readonly BrowserHolder[]): Promise<vo
     const lease = holder.browser.getLease();
     if (lease) live.push(lease);
   }
-  getProxyPool().reconcile(live);
+  cumulativeReclaimedLeases += getProxyPool().reconcile(live);
 
   const owned = new Set(holders.map((h) => h.browser.getProfileId()));
   try {
     const deleted = await getBrowserManager().reconcileGroupProfiles(owned);
+    cumulativeReclaimedProfiles += deleted;
     if (deleted > 0) console.warn(`[Crawler] 고아 프로필 ${deleted}개 삭제`);
   } catch (error: unknown) {
     console.warn(
@@ -916,6 +981,7 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   registerBrowserStatusesGetter(() =>
     holders.map((h) => h.browser.getStatus()),
   );
+  holdersSnapshot = () => holders;
 
   try {
     // ========================================
@@ -997,6 +1063,7 @@ export async function startCrawling(): Promise<CrawlResult[]> {
     // ========================================
     // 상태 조회 함수 해제
     unregisterBrowserStatusesGetter();
+    holdersSnapshot = null;
 
     // 브라우저는 닫지 않음 (BrowserManager가 관리)
     setRunning(false);

@@ -16,7 +16,13 @@ import * as db from "./database/sqlite";
 import * as adspower from "./services/adspower";
 import * as apiSvc from "./services/api";
 import { getProxyPool, type Proxy } from "./lib/proxy-pool";
-import { startCrawling, stopCrawler, getCrawlerStatus, getCrawlerProgress } from "./lib/crawler";
+import {
+  startCrawling,
+  stopCrawler,
+  getCrawlerStatus,
+  getCrawlerProgress,
+  getCrawlerHealth,
+} from "./lib/crawler";
 import { getBrowserManager, type PreparationResult } from "./lib/crawler/browser-manager";
 import { getProfilePool } from "./lib/crawler/profile-pool";
 
@@ -411,6 +417,17 @@ const handlers: Record<string, (args: unknown[]) => unknown | Promise<unknown>> 
         progress: getCrawlerProgress(),
         readyBrowserCount: getBrowserManager().getReadyCount(),
       };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
+    }
+  },
+  /**
+   * 불변식 관측 (REDESIGN §10-5). 무인 운영에서 조용한 열화를 잡는 단일 창구다:
+   * parked/zombie 증가, 브레이커 개방, lease 잔고 하락, 리컨실 회수 누적이 모두 여기 보인다.
+   */
+  "crawler-get-health": () => {
+    try {
+      return { success: true, health: getCrawlerHealth() };
     } catch (e) {
       return { success: false, error: errMsg(e) };
     }

@@ -149,6 +149,11 @@ export class ProxyPool {
     const rows = (groupId === undefined ? db.getProxies() : db.getProxiesByGroup(groupId)) as Proxy[];
     return rows.filter((p) => p.status !== 'dead').length;
   }
+
+  /** 현재 lease 중인 개수 — 관측용. 브라우저 수와 어긋나면 누수 신호다. */
+  leasedCount(): number {
+    return db.getLeasedProxies().length;
+  }
 }
 
 let instance: ProxyPool | null = null;
