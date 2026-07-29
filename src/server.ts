@@ -32,10 +32,18 @@ const HARDCODED_API_KEY = "268820ebcb76ffe2def2d28d04dfd4ae";
 const DEFAULT_GROUP_NAME = "scrapper";
 const DEFAULT_PROFILE_COUNT = 2;
 const PID_FILE = join(DATA_DIR, "scrapper.pid");
-/** OS + 이 프로세스에 남겨둘 여유. 이 밑으로 내려가면 스왑이 시작되고 loadavg 가 붕괴한다. */
-const MEM_RESERVE_BYTES = 4 * 1024 ** 3;
-/** 브라우저 1개의 실측 한계 비용. 16GB 맥에 20개를 띄웠을 때 여유 59MB / loadavg 89 였다. */
-const PER_BROWSER_BYTES = 900 * 1024 ** 2;
+/**
+ * 수용 제어 상수 — 이 맥의 실측에 맞춰 보정했다. env 로 재보정 가능.
+ *
+ * 실측(16GB / 10코어):
+ *  - 브라우저 20개 → 여유 59MB, loadavg 89 → 스왑 붕괴, 강제 리부팅 3회
+ *  - 브라우저 15개 → 여유 약 2.4GB, 수 시간 안정 가동
+ * 따라서 15 는 허용하고 20 은 막아야 한다. 기본값은 그 사이에 오도록 잡았다
+ * (16384MiB − 3072MiB) ÷ 850MiB = 15. 부팅 클램프는 정적 추정이므로,
+ * 실제 사용량 변동은 런타임 압박 가드(crawler.ts systemUnderPressure)가 받는다.
+ */
+const MEM_RESERVE_BYTES = Number(process.env.SCRAPPER_MEM_RESERVE_MB ?? 3072) * 1024 ** 2;
+const PER_BROWSER_BYTES = Number(process.env.SCRAPPER_PER_BROWSER_MB ?? 850) * 1024 ** 2;
 // 거부 사유는 `message` 와 `error` 양쪽에 싣는다 — 대시보드는 실패를 `error` 로 읽어서,
 // `message` 만 주면 조작자에게 "알 수 없는 오류"로 표시된다(거부가 조용한 실패로 보이면 안 된다).
 const BUSY_REJECTION = "크롤링 중에는 실행할 수 없습니다. 먼저 중지하세요.";
@@ -207,7 +215,8 @@ function clampBrowserCount(requested: number): number {
   if (effective < requested) {
     console.warn(
       `[server] ⚠️ 동시 브라우저 수 클램프: 요청 ${requested} → 실효 ${effective} ` +
-        `(메모리 상한 ${memCap} = (총 ${Math.round(mem / 1024 ** 3)}GiB − 예약 4GiB) ÷ 900MiB, ` +
+        `(메모리 상한 ${memCap} = (총 ${Math.round(mem / 1024 ** 3)}GiB − 예약 ` +
+        `${Math.round(MEM_RESERVE_BYTES / 1024 ** 2)}MiB) ÷ ${Math.round(PER_BROWSER_BYTES / 1024 ** 2)}MiB, ` +
         `풀 상한 ${poolCap} = 프록시 ${poolSize}개 − 회전 여유 1)`,
     );
   }

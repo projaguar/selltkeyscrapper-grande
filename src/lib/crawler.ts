@@ -187,15 +187,30 @@ const RECONCILE_INTERVAL_MS = 60_000;
 export interface CrawlerHealth {
   runId: number;
   isRunning: boolean;
-  browsers: { total: number; ready: number; parked: number; zombie: number };
+  /**
+   * `operational` = 브라우저 인스턴스가 살아있고 보류/에러가 아닌 슬롯.
+   * 예전엔 `status === "ready"` 만 셌는데, 정상 가동 중인 fleet 은 대부분 `crawling`/`waiting`
+   * 이어서 건강한 상태가 `0/13` 으로 보였다 — 무인 운영에서 상시 오경보를 내는 지표였다.
+   */
+  browsers: {
+    total: number;
+    operational: number;
+    parked: number;
+    zombie: number;
+    error: number;
+    byStatus: Record<string, number>;
+  };
   breaker: "closed" | "open" | "half-open";
   lockPending: number;
   proxies: { total: number; available: number; leased: number };
+  /** 시스템 압박 — 이 값이 참이면 태스크 인테이크가 일시정지된다 */
+  system: { freeMb: number; load1: number; cores: number; underPressure: boolean };
   cumulative: {
     reclaimedLeases: number;
     reclaimedProfiles: number;
     parks: number;
     zombies: number;
+    pressurePauses: number;
   };
 }
 
@@ -203,24 +218,30 @@ let cumulativeReclaimedLeases = 0;
 let cumulativeReclaimedProfiles = 0;
 let cumulativeParks = 0;
 let cumulativeZombies = 0;
+let cumulativePressurePauses = 0;
 /** 실행 중에만 등록된다. 미등록이면 브라우저 집계 없이 풀/브레이커만 보고한다. */
 let holdersSnapshot: (() => readonly BrowserHolder[]) | null = null;
 
 export function getCrawlerHealth(): CrawlerHealth {
   const pool = getProxyPool();
   const holders = holdersSnapshot?.() ?? [];
-  let ready = 0;
+  let operational = 0;
   let parked = 0;
   let zombie = 0;
+  let errored = 0;
+  const byStatus: Record<string, number> = {};
   for (const holder of holders) {
+    const status = holder.browser.getStatus().status;
+    byStatus[status] = (byStatus[status] ?? 0) + 1;
     if (holder.suspended === "parked") parked++;
     else if (holder.suspended === "zombie") zombie++;
-    else if (holder.browser.isReady()) ready++;
+    else if (holder.browser.hasError()) errored++;
+    else if (holder.browser.hasBrowser()) operational++;
   }
   return {
     runId: currentRunId,
     isRunning: isRunning(),
-    browsers: { total: holders.length, ready, parked, zombie },
+    browsers: { total: holders.length, operational, parked, zombie, error: errored, byStatus },
     breaker: adsPowerQueue.breakerState(),
     lockPending: getLifecycleLock().pendingKeys(),
     proxies: {
@@ -228,13 +249,56 @@ export function getCrawlerHealth(): CrawlerHealth {
       available: pool.availableCount(),
       leased: pool.leasedCount(),
     },
+    system: {
+      freeMb: Math.round(os.freemem() / 1024 / 1024),
+      load1: Number((os.loadavg()[0] ?? 0).toFixed(1)),
+      cores: os.cpus().length,
+      underPressure: underPressure,
+    },
     cumulative: {
       reclaimedLeases: cumulativeReclaimedLeases,
       reclaimedProfiles: cumulativeReclaimedProfiles,
       parks: cumulativeParks,
       zombies: cumulativeZombies,
+      pressurePauses: cumulativePressurePauses,
     },
   };
+}
+
+/**
+ * 런타임 압박 가드 (REDESIGN §5).
+ *
+ * 부팅 시 동시 브라우저 수 클램프만으로는 부족하다 — 실제 사용량은 페이지 내용에 따라 변하고,
+ * 정지 실패로 고아 프로세스가 남으면 실효 동시성이 설정값을 넘는다. 16GB 맥에서 여유가 바닥나면
+ * 스왑이 시작되고 loadavg 가 붕괴해 머신이 멈췄다(3회 강제 리부팅).
+ *
+ * 압박이면 **새 태스크 인테이크만** 멈춘다. 브라우저를 죽이지 않으므로 회복 후 즉시 재개되고,
+ * 배치는 워치독 상한 안에서 종료되므로 무한 정지가 되지 않는다.
+ */
+const PRESSURE_SAMPLE_MS = 5_000;
+const PRESSURE_FREE_MIN_BYTES = 1.2 * 1024 ** 3;
+let lastPressureSample = 0;
+let underPressure = false;
+
+function systemUnderPressure(): boolean {
+  const now = Date.now();
+  if (now - lastPressureSample < PRESSURE_SAMPLE_MS) return underPressure;
+  lastPressureSample = now;
+
+  const free = os.freemem();
+  const cores = os.cpus().length;
+  const load1 = os.loadavg()[0] ?? 0;
+  const next = free < PRESSURE_FREE_MIN_BYTES || load1 > cores * 4;
+  if (next !== underPressure) {
+    const freeMb = Math.round(free / 1024 / 1024);
+    console.warn(
+      `[Crawler] 시스템 압박 ${next ? "진입 — 태스크 인테이크 일시정지" : "해제 — 재개"} ` +
+        `(여유 ${freeMb}MB, load ${load1.toFixed(1)}/${cores})`,
+    );
+    if (next) cumulativePressurePauses++;
+  }
+  underPressure = next;
+  return underPressure;
 }
 
 // 브라우저 죽음을 감지하는 에러 패턴
@@ -325,6 +389,13 @@ async function runBrowserWorker(
       }
       consecutiveDeadErrors = 0;
       await delay(3000);
+      continue;
+    }
+
+    // 시스템 압박이면 새 태스크를 집지 않는다. 브라우저는 유지하므로 회복 시 즉시 재개된다.
+    if (systemUnderPressure()) {
+      browser.updateStatus("waiting", "시스템 압박 — 인테이크 일시정지");
+      await delay(5000);
       continue;
     }
 
