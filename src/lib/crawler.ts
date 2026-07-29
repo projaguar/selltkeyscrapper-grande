@@ -203,8 +203,18 @@ export interface CrawlerHealth {
   breaker: "closed" | "open" | "half-open";
   lockPending: number;
   proxies: { total: number; available: number; leased: number };
-  /** 시스템 압박 — 이 값이 참이면 태스크 인테이크가 일시정지된다 */
-  system: { freeMb: number; load1: number; cores: number; underPressure: boolean };
+  /**
+   * 시스템 압박 — 참이면 태스크 인테이크가 일시정지된다.
+   * 판정은 `load1 > loadThreshold` 로만 한다. `freeMb` 는 참고값이며 판정에 쓰지 않는다:
+   * macOS 는 inactive/purgeable 를 캐시로 보유해 건강한 상태에서도 수백 MB 로 읽힌다.
+   */
+  system: {
+    freeMb: number;
+    load1: number;
+    cores: number;
+    loadThreshold: number;
+    underPressure: boolean;
+  };
   cumulative: {
     reclaimedLeases: number;
     reclaimedProfiles: number;
@@ -253,6 +263,7 @@ export function getCrawlerHealth(): CrawlerHealth {
       freeMb: Math.round(os.freemem() / 1024 / 1024),
       load1: Number((os.loadavg()[0] ?? 0).toFixed(1)),
       cores: os.cpus().length,
+      loadThreshold: Number((os.cpus().length * PRESSURE_LOAD_PER_CORE).toFixed(1)),
       underPressure: underPressure,
     },
     cumulative: {
@@ -269,14 +280,24 @@ export function getCrawlerHealth(): CrawlerHealth {
  * 런타임 압박 가드 (REDESIGN §5).
  *
  * 부팅 시 동시 브라우저 수 클램프만으로는 부족하다 — 실제 사용량은 페이지 내용에 따라 변하고,
- * 정지 실패로 고아 프로세스가 남으면 실효 동시성이 설정값을 넘는다. 16GB 맥에서 여유가 바닥나면
- * 스왑이 시작되고 loadavg 가 붕괴해 머신이 멈췄다(3회 강제 리부팅).
+ * 정지 실패로 고아 프로세스가 남으면 실효 동시성이 설정값을 넘는다. 메모리가 바닥나면
+ * 스왑 스래싱이 시작되고 loadavg 가 붕괴해 머신이 멈췄다(3회 강제 리부팅, 당시 load 89/10코어).
  *
- * 압박이면 **새 태스크 인테이크만** 멈춘다. 브라우저를 죽이지 않으므로 회복 후 즉시 재개되고,
+ * **판정에 `os.freemem()` 을 쓰지 않는다.** macOS 는 inactive/purgeable 페이지를 캐시로 보유하고
+ * `os.freemem()` 은 그것들을 제외한 '순수 free' 만 반환하므로, 건강한 상태에서도 200~400MB 로
+ * 읽힌다. 실측: freemem 281MB 인 시점에 실질 가용은 5,378MB(free+inactive+purgeable)이고
+ * macOS 자체 압박 레벨은 1(정상), load 는 3.96/10 이었다. 이 값으로 판정했더니 정상 가동 중인
+ * 프로덕션의 태스크 인테이크를 계속 막아 처리량을 떨어뜨렸다.
+ *
+ * 대신 **loadavg** 를 쓴다. 메모리 고갈 → 스왑 스래싱 → load 붕괴가 실제 실패 경로이고,
+ * load 는 그 경로의 신뢰할 수 있는 신호다(정상 4~10 vs 사고 89). 포크 없이 읽을 수 있다.
+ *
+ * 압박이면 **새 태스크 인테이크만** 멈춘다. 브라우저를 죽이지 않으므로 회복 시 즉시 재개되고,
  * 배치는 워치독 상한 안에서 종료되므로 무한 정지가 되지 않는다.
  */
 const PRESSURE_SAMPLE_MS = 5_000;
-const PRESSURE_FREE_MIN_BYTES = 1.2 * 1024 ** 3;
+/** 코어당 부하 배수. 정상 0.4~1.0, 사고 시 8.9 였다. 2.5 는 그 사이의 명확한 분리점. */
+const PRESSURE_LOAD_PER_CORE = 2.5;
 let lastPressureSample = 0;
 let underPressure = false;
 
@@ -285,15 +306,13 @@ function systemUnderPressure(): boolean {
   if (now - lastPressureSample < PRESSURE_SAMPLE_MS) return underPressure;
   lastPressureSample = now;
 
-  const free = os.freemem();
   const cores = os.cpus().length;
   const load1 = os.loadavg()[0] ?? 0;
-  const next = free < PRESSURE_FREE_MIN_BYTES || load1 > cores * 4;
+  const next = load1 > cores * PRESSURE_LOAD_PER_CORE;
   if (next !== underPressure) {
-    const freeMb = Math.round(free / 1024 / 1024);
     console.warn(
       `[Crawler] 시스템 압박 ${next ? "진입 — 태스크 인테이크 일시정지" : "해제 — 재개"} ` +
-        `(여유 ${freeMb}MB, load ${load1.toFixed(1)}/${cores})`,
+        `(load ${load1.toFixed(1)}/${cores}, 임계 ${(cores * PRESSURE_LOAD_PER_CORE).toFixed(0)})`,
     );
     if (next) cumulativePressurePauses++;
   }
