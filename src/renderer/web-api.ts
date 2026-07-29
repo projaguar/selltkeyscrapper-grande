@@ -121,15 +121,6 @@ const webApi = {
     test: () => invoke("proxypool-test"),
   },
 
-  session: {
-    assignProxyToProfile: (apiKey: string, profileId: string, profileName: string) =>
-      invoke("session-assign-proxy-to-profile", apiKey, profileId, profileName),
-    assignProxyToAll: (apiKey: string) => invoke("session-assign-proxy-to-all", apiKey),
-    getAll: (apiKey: string) => invoke("session-get-all", apiKey),
-    replaceProxy: (apiKey: string, profileId: string) =>
-      invoke("session-replace-proxy", apiKey, profileId),
-  },
-
   api: {
     getUrlList: () => invoke("api-get-url-list"),
   },

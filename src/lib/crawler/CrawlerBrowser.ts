@@ -10,7 +10,38 @@
 
 import * as adspower from "../../services/adspower";
 import { adsPowerQueue } from "./adspower-queue";
-import type { Proxy } from "../proxy-pool";
+import type { ProxyLease } from "../proxy-pool";
+import { ProfileGoneError, StopUnconfirmedError } from "../errors";
+
+/** 정지 확인 폴링 — 확인되지 않으면 lease 를 반납하지 않는다(트래픽 잔존 위험) */
+const STOP_CONFIRM_ATTEMPTS = 5;
+const STOP_CONFIRM_INTERVAL_MS = 1_000;
+
+/**
+ * `{ data: { ws: { puppeteer } } }` 에서 ws 엔드포인트를 안전하게 꺼낸다.
+ * 브로커는 게이트웨이 페이지·잘린 본문 등 무엇이든 돌려줄 수 있어 형태 가정이 불가하다.
+ */
+function extractWsEndpoint(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || !("data" in payload)) return undefined;
+  const data = payload.data;
+  if (!data || typeof data !== "object" || !("ws" in data)) return undefined;
+  const ws = data.ws;
+  if (!ws || typeof ws !== "object" || !("puppeteer" in ws)) return undefined;
+  const endpoint = ws.puppeteer;
+  return typeof endpoint === "string" && endpoint.length > 0 ? endpoint : undefined;
+}
+
+/**
+ * `{ data: { status: "Active" } }` 인지 판별.
+ * 형태를 알 수 없는 응답은 Active 로 보지 않는다 — 정지 확인 경로에서 이 판단이
+ * 잘못되면 살아있는 브라우저를 정지했다고 믿고 프록시를 반납해 IP 를 공유하게 된다.
+ */
+function isActiveStatus(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || !("data" in payload)) return false;
+  const data = payload.data;
+  if (!data || typeof data !== "object" || !("status" in data)) return false;
+  return data.status === "Active";
+}
 
 // puppeteer-core는 dynamic import로 사용 (Electron main process)
 let puppeteer: any = null;
@@ -54,7 +85,7 @@ export interface CrawlerBrowserConfig {
   profileId: string;
   profileName: string;
   apiKey: string;
-  proxy?: Proxy;
+  lease?: ProxyLease;
   proxyGroupId?: number;
   proxyGroupName?: string;
 }
@@ -73,9 +104,15 @@ export class CrawlerBrowser {
   private readonly profileName: string;
 
   // Proxy 정보
-  private proxyId?: number;
-  private proxyIp?: string;
-  private proxyPort?: string;
+  /**
+   * 보유 중인 프록시 사용권. 소유권의 진실은 DB 이고 이건 그 사본이 아니라 '핸들'이다.
+   * 반납은 반드시 이 lease 로 해야 하며(소유권 검증), 없으면 반납할 것이 없다.
+   */
+  private lease: ProxyLease | null = null;
+  /** updateProfile 성공 여부. false 면 AdsPower 는 아직 이 프록시를 모른다 */
+  private proxyApplied = false;
+  /** 프록시 검증에서 관측된 실제 egress IP (표시용) */
+  private observedIp?: string;
 
   // Proxy Group 정보
   private proxyGroupId?: number;
@@ -96,7 +133,7 @@ export class CrawlerBrowser {
   private readonly apiKey: string;
 
   // 재시작 중복 방지
-  private isRestarting: boolean = false;
+
 
   // 이미지 차단 플래그 (실시간 제어 가능)
   private blockImages: boolean = false;
@@ -111,13 +148,10 @@ export class CrawlerBrowser {
     this.profileId = config.profileId;
     this.profileName = config.profileName;
     this.apiKey = config.apiKey;
-    if (config.proxy) {
-      this.assignProxy(config.proxy);
-    }
+    this.proxyGroupId = config.proxyGroupId ?? 1;
+    if (config.lease) this.lease = config.lease;
 
-    if (config.proxyGroupId !== undefined) {
-      this.proxyGroupId = config.proxyGroupId;
-    }
+
     if (config.proxyGroupName) {
       this.proxyGroupName = config.proxyGroupName;
     }
@@ -127,41 +161,55 @@ export class CrawlerBrowser {
   // Profile 관리 (Proxy, Tabs)
   // ========================================
 
-  /**
-   * Proxy 할당 (메모리만 업데이트, AdsPower 업데이트는 updateProxySettings 호출 필요)
-   */
-  private assignProxy(proxy: Proxy): void {
-    this.proxyId = proxy.id;
-    this.proxyIp = proxy.ip;
-    this.proxyPort = proxy.port;
+  /** 보유 lease 조회 */
+  getLease(): ProxyLease | null {
+    return this.lease;
   }
 
   /**
-   * AdsPower 프로필에 Proxy 설정 + 탭 설정(open_urls) 업데이트
+   * 보유 lease 를 떼어내 반환한다(소유권 이전).
+   * 호출자가 반납 책임을 가져가므로, 이 브라우저는 더 이상 그 프록시를 자기 것으로 주장하지 않는다.
    */
-  async updateProxySettings(proxy: Proxy): Promise<void> {
-    const updateData: any = {
-      user_proxy_config: {
-        proxy_type: 'http',
-        proxy_host: proxy.ip,
-        proxy_port: proxy.port,
-        proxy_user: proxy.username || '',
-        proxy_password: proxy.password || '',
-        proxy_soft: 'other',
-      },
-      open_urls: ['https://www.naver.com'],
-    };
+  takeLease(): ProxyLease | null {
+    const held = this.lease;
+    this.lease = null;
+    this.proxyApplied = false;
+    return held;
+  }
 
-    // 소유권 즉시 기록: broker updateProfile 이 502/503/504/timeout 으로 실패해도
-    // 이 프록시는 이 브라우저 소유로 남는다 → 호출자(handleBrowserRestart/changeAllBrowserIPs)의
-    // 다음-시도 release(getProxyId) 가 정확히 이 프록시를 반환하여 in_use 풀 누수를 막는다.
-    this.assignProxy(proxy);
+  isProxyApplied(): boolean {
+    return this.proxyApplied;
+  }
 
-    // 큐를 통해 rate limit 준수
-    await adsPowerQueue.enqueue(
-      `updateProfile ${this.profileId}`,
-      () => adspower.updateProfile(this.apiKey, this.profileId, updateData),
+  /**
+   * 새 lease 를 AdsPower 프로필에 적용하고 브라우저를 시작한다.
+   *
+   * `proxyApplied` 는 updateProfile 이 **성공한 뒤에만** true 가 된다. 이 플래그가 false 인 동안은
+   * AdsPower 가 아직 이 프록시를 모르므로, 호출자는 "이 브라우저가 이 IP 로 트래픽을 낸다"고
+   * 가정해선 안 된다(I3).
+   */
+  async startWithLease(lease: ProxyLease): Promise<void> {
+    this.lease = lease;
+    this.proxyApplied = false;
+    this.observedIp = undefined;
+    this.updateStatus("starting", `프록시 적용 중 ${lease.ip}:${lease.port}`);
+
+    await adsPowerQueue.enqueue(`updateProfile ${this.profileId}`, () =>
+      adspower.updateProfile(this.apiKey, this.profileId, {
+        user_proxy_config: {
+          proxy_type: "http",
+          proxy_host: lease.ip,
+          proxy_port: lease.port,
+          proxy_user: lease.username ?? "",
+          proxy_password: lease.password ?? "",
+          proxy_soft: "other",
+        },
+        open_urls: ["https://www.naver.com"],
+      }),
     );
+    this.proxyApplied = true;
+
+    await this.start();
   }
 
   /**
@@ -195,25 +243,27 @@ export class CrawlerBrowser {
     this.updateStatus("starting", "브라우저 시작 중...");
 
     try {
-      // 1. AdsPower API로 브라우저 시작 (큐를 통해 rate limit 준수)
-      //    browser/start 는 브로커가 재시도하지 않음 → 맹목적 재호출 금지.
-      //    브로커 5xx/타임아웃이면 실제로 기동됐을 수 있어 상태 확인 후 기존 인스턴스 채택.
+      // browser/start 는 브로커가 재시도하지 않는다.
+      //
+      // 이전 구현은 브로커 5xx/타임아웃 시 checkBrowserStatus 로 "이미 돌고 있는 인스턴스"를
+      // 채택했다. 그러나 그 인스턴스가 **우리가 방금 설정한 프록시로 기동됐다는 증거가 없다**
+      // (AdsPower 는 프록시를 기동 시점에 바인딩한다). 정지 실패로 살아남은 구 인스턴스를
+      // 채택하면 헌 IP 로 크롤하면서 성공을 보고하고, 그 프록시는 이미 반납돼 다른 브라우저에
+      // 배정된다 → I1·I3 동시 위반. 게다가 모든 호출부가 validateProxy:false 라 탐지 불가였다.
+      //
+      // 따라서 채택하지 않는다. 결과 불명이면 **확인된 정지로 정리한 뒤 던진다** — 호출자가
+      // 깨끗하게 재시도한다. 고아 프로세스도 이 정지로 함께 회수된다.
       const result = await adsPowerQueue
         .startBrowser(this.apiKey, this.profileId)
-        .catch((e: unknown) => {
-          if (e instanceof adspower.BrokerError && (e.status >= 500 || e.status === 0)) {
-            return adsPowerQueue.enqueue(
-              `active ${this.profileId}`,
-              () => adspower.checkBrowserStatus(this.apiKey, this.profileId),
-            );
-          }
-          throw e;
+        .catch(async (error: unknown) => {
+          await this.stop().catch(() => undefined);
+          throw error;
         });
 
-      // AdsPower returns { code: 0, data: { ws: { puppeteer: "ws://..." }, ... } }
-      const wsEndpoint = result.data?.ws?.puppeteer;
+      // 브로커/AdsPower 응답은 검증되지 않은 외부 입력이므로 형태를 확인하고 꺼낸다.
+      const wsEndpoint = extractWsEndpoint(result);
       if (!wsEndpoint) {
-        throw new Error('AdsPower did not return WebSocket endpoint');
+        throw new Error("AdsPower did not return WebSocket endpoint");
       }
 
       console.log(`[CrawlerBrowser] ${this.profileName} - Connecting to ${wsEndpoint}`);
@@ -245,7 +295,7 @@ export class CrawlerBrowser {
 
           if (validationResult.valid) {
             if (validationResult.actualIp) {
-              this.proxyIp = validationResult.actualIp;
+              this.observedIp = validationResult.actualIp;
             }
             proxyValidated = true;
             break;
@@ -269,18 +319,21 @@ export class CrawlerBrowser {
       }
 
       this.updateStatus("ready", "준비 완료");
-    } catch (error: any) {
-      this.error = error.message;
-      this.updateStatus("error", error.message);
+    } catch (error: unknown) {
+      // 연결 확립 후 후속 단계에서 던지면 CDP 연결이 새므로 반드시 끊는다.
+      // (이전 구현은 this.browser 를 그대로 남겨 재시도마다 websocket 이 누적됐다)
+      this.disconnect();
+      const message = error instanceof Error ? error.message : String(error);
+      this.updateStatus("error", message);
       throw error;
     }
   }
 
   /**
-   * Puppeteer 연결만 해제 (AdsPower API 호출 없이)
-   * 일괄 종료 시 사용: AdsPower stop 은 호출자가 프로필별로 개별 처리한다.
+   * Puppeteer 연결만 해제 (AdsPower 호출 없음). 상태는 바꾸지 않는다 —
+   * "연결이 끊겼다"와 "프로세스가 정지했다"는 다른 사실이고, 후자는 stop() 만 단정할 수 있다.
    */
-  disconnectOnly(): void {
+  disconnect(): void {
     if (this.browser) {
       try {
         this.browser.disconnect();
@@ -290,92 +343,61 @@ export class CrawlerBrowser {
       this.browser = undefined;
     }
     this.requestInterceptionSetup = false;
-    this.updateStatus("stopped", "중지됨");
   }
 
   /**
-   * 브라우저 중지 (puppeteer disconnect + AdsPower API stop)
-   * @param fireAndForget true면 stop API 응답을 기다리지 않음 (재시작 시 속도 최적화)
+   * 확인된 정지 (REDESIGN §4).
+   *
+   * 이전 구현은 AdsPower stop 실패를 로그만 남기고 무조건 status='stopped' 로 바꿨다.
+   * 그러면 실제로는 살아있는 브라우저가 헌 프록시로 계속 트래픽을 내는데 호출자는 정지했다고
+   * 믿고 그 프록시를 반납한다 → 다른 브라우저가 같은 IP 를 받는다(I1/I3). 고아 Chromium 이
+   * 쌓여 메모리 고갈 사고로도 이어졌다.
+   *
+   * 여기서는 checkBrowserStatus 로 Inactive 를 **확인**하고, 확인하지 못하면 던진다.
+   * 호출자는 이 경우 **lease 를 반납하지 말고** zombie 로 격리해야 한다.
    */
-  async stop(fireAndForget = false): Promise<void> {
-    // puppeteer 연결 해제
-    if (this.browser) {
-      try {
-        this.browser.disconnect();
-      } catch {
-        // 이미 연결이 끊어진 경우 무시
-      }
-      this.browser = undefined;
-    }
+  async stop(): Promise<void> {
+    this.disconnect();
 
-    // 리소스 차단 설정 플래그 리셋 (재시작 시 다시 설정할 수 있도록)
-    this.requestInterceptionSetup = false;
-
-    // AdsPower API로 브라우저 종료
-    if (fireAndForget) {
-      // fire-and-forget: 응답 기다리지 않음 (재시작 시 속도 최적화)
-      adsPowerQueue.stopBrowser(this.apiKey, this.profileId).catch((e: any) => {
-        console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
-      });
-    } else {
-      try {
-        await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
-      } catch (e: any) {
-        console.log(`[CrawlerBrowser] ${this.profileName} - AdsPower stop failed (무시): ${e.message}`);
-      }
-    }
-
-    this.updateStatus("stopped", "중지됨");
-  }
-
-  /**
-   * 브라우저 재시작 (stop → 프록시 설정 → start, 단일 시도)
-   * 재시도는 호출자(handleBrowserRestart)가 다른 프록시로 담당.
-   */
-  async restart(newProxy?: Proxy): Promise<void> {
-    // 중복 재시작 방지
-    if (this.isRestarting) {
-      for (let i = 0; i < 30; i++) {
-        await this.delay(1000);
-        if (!this.isRestarting) {
-          return;
+    try {
+      await adsPowerQueue.stopBrowser(this.apiKey, this.profileId);
+    } catch (error: unknown) {
+      // 프로필이 없으면 그 프로세스도 없다 → 정지로 간주한다.
+      if (!(error instanceof ProfileGoneError)) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!(await this.confirmInactive())) {
+          this.updateStatus("error", `정지 미확인: ${detail}`);
+          throw new StopUnconfirmedError(this.profileId, detail);
         }
+        this.updateStatus("stopped", "중지됨(확인)");
+        return;
       }
-      throw new Error("Restart timeout: already restarting by another process");
     }
 
-    this.isRestarting = true;
-    this.updateStatus("restarting", "재시작 중...");
-
-    try {
-      // stop API 응답을 기다리지 않고 즉시 진행 (fire-and-forget)
-      await this.stop(true);
-      await this.delay(500);
-
-      if (newProxy) {
-        await this.updateProxySettings(newProxy);
-      }
-
-      await this.start({ validateProxy: false, validateConnection: false });
-    } finally {
-      this.isRestarting = false;
+    if (!(await this.confirmInactive())) {
+      this.updateStatus("error", "정지 미확인");
+      throw new StopUnconfirmedError(this.profileId, "checkBrowserStatus 가 Active 를 계속 보고");
     }
+    this.updateStatus("stopped", "중지됨");
   }
 
-  /**
-   * 이미 종료된 상태에서 새 프록시로 시작 (stop 단계 생략)
-   * changeAllBrowserIPs에서 일괄 종료 후 사용
-   */
-  async startWithNewProxy(newProxy: Proxy): Promise<void> {
-    this.isRestarting = true;
-    this.updateStatus("restarting", "프록시 변경 중...");
-
-    try {
-      await this.updateProxySettings(newProxy);
-      await this.start({ validateProxy: false, validateConnection: false });
-    } finally {
-      this.isRestarting = false;
+  /** AdsPower 가 이 프로필을 Inactive 로 보고할 때까지 유한 폴링 */
+  private async confirmInactive(): Promise<boolean> {
+    for (let attempt = 1; attempt <= STOP_CONFIRM_ATTEMPTS; attempt++) {
+      try {
+        const res = await adsPowerQueue.enqueue(`active ${this.profileId}`, () =>
+          adspower.checkBrowserStatus(this.apiKey, this.profileId),
+        );
+        // 브로커 응답은 검증되지 않은 외부 입력이다. Active 라고 확실히 말하지 않는 응답은
+        // "Active 아님"으로 보지 않고 재확인한다(정지 확인은 보수적으로 판단해야 안전하다).
+        if (!isActiveStatus(res)) return true;
+      } catch (error: unknown) {
+        if (error instanceof ProfileGoneError) return true;
+        // 브로커 장애로 확인 자체가 불가 — 남은 시도로 재확인한다.
+      }
+      if (attempt < STOP_CONFIRM_ATTEMPTS) await this.delay(STOP_CONFIRM_INTERVAL_MS);
     }
+    return false;
   }
 
   /**
@@ -603,7 +625,17 @@ export class CrawlerBrowser {
    */
   async keepalive(): Promise<void> {
     if (!this.browser) return;
-    if (this.status === 'error' || this.status === 'restarting' || this.status === 'stopped') return;
+    // 'starting'/'crawling' 도 건드리지 않는다 — 다른 태스크가 그 브라우저를 조작 중이며,
+    // 여기서 browser 를 비우면 그 태스크가 "Browser not started" 로 죽는다.
+    if (
+      this.status === "error" ||
+      this.status === "restarting" ||
+      this.status === "stopped" ||
+      this.status === "starting" ||
+      this.status === "crawling"
+    ) {
+      return;
+    }
 
     try {
       const pages = await this.browser.pages();
@@ -637,10 +669,13 @@ export class CrawlerBrowser {
     }
 
     // ready 상태에서만 초기화 (waiting은 이전 작업 정보 유지)
+    // ready 진입 시 직전 에러를 지운다. 남겨두면 회복된 브라우저의 상태·로그에 죽은 에러가
+    // 계속 실려 나가 로그를 부풀리고 원인 추적을 방해한다.
     if (status === "ready") {
       this.storeName = undefined;
       this.platform = undefined;
       this.collectedCount = undefined;
+      this.error = undefined;
     }
   }
 
@@ -676,7 +711,7 @@ export class CrawlerBrowser {
       status: this.status,
       platform: this.platform,
       proxyGroupName: this.proxyGroupName,
-      proxyIp: this.proxyIp ? `${this.proxyIp}:${this.proxyPort}` : undefined,
+      proxyIp: this.observedIp ?? (this.lease ? `${this.lease.ip}:${this.lease.port}` : undefined),
       storeName: this.storeName,
       message: this.message,
       collectedCount: this.collectedCount,
@@ -717,17 +752,11 @@ export class CrawlerBrowser {
     return this.profileName;
   }
 
-  getProxyId(): number | undefined {
-    return this.proxyId;
+  getProxyGroupId(): number {
+    return this.proxyGroupId ?? 1;
   }
 
-  getProxyIp(): string | undefined {
-    return this.proxyIp;
-  }
 
-  getProxyGroupId(): number | undefined {
-    return this.proxyGroupId;
-  }
 
   getProxyGroupName(): string | undefined {
     return this.proxyGroupName;
@@ -754,6 +783,8 @@ export class CrawlerBrowser {
   // ========================================
 
   private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, ms);
+    return promise;
   }
 }

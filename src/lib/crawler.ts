@@ -51,7 +51,9 @@ import {
 } from "./crawler/task-manager";
 import { crawlNaver } from "./crawler/platforms/naver";
 import { crawlAuction } from "./crawler/platforms/auction";
-import { getProxyPool } from "./proxy-pool";
+import { getProxyPool, type ProxyLease } from "./proxy-pool";
+import { getLifecycleLock } from "./lifecycle-lock";
+import { ProfileGoneError, QuotaError, StopUnconfirmedError } from "./errors";
 import {
   initRestartLogger,
   logRestart,
@@ -134,13 +136,46 @@ function classifyResult(
   };
 }
 
-// Mutable wrapper: worker가 프로필 재생성 후 새 CrawlerBrowser를 사용할 수 있게 함
+/**
+ * Mutable wrapper: 프로필 재생성 시 새 CrawlerBrowser 로 교체된다.
+ * 복구 상태(실패 횟수·보류·백오프)를 브라우저 객체가 아니라 holder 에 두는 이유:
+ * 재생성으로 객체가 바뀌어도 그 슬롯의 이력이 유지되어야 무한 재시도를 캡할 수 있다.
+ */
 interface BrowserHolder {
   browser: CrawlerBrowser;
+  /** 연속 복구 실패 횟수 */
+  failures: number;
+  /**
+   * 보류 상태. `none` 이 아니면 워커가 이 슬롯을 건드리지 않는다.
+   * `zombie` = 정지를 확인하지 못해 lease 를 반납할 수 없는 상태(트래픽 잔존 가능).
+   * `parked` = 유한 재시도를 소진한 상태.
+   * **둘 다 종점이 아니다** — 재활 타이머가 되살린다. 모델 검증에서 `parked` 를 종점으로 두면
+   * 브로커 일시 장애가 영구적 fleet 축소로 굳어 I4(진행성)가 깨졌다.
+   */
+  suspended: "none" | "parked" | "zombie";
+  /** 지수 백오프 — 이 시각 이전에는 복구를 시도하지 않는다 */
+  nextAttemptAt: number;
+  /** 재생성 에스컬레이션을 이미 소비했는지 */
+  escalated: boolean;
 }
 
-// IP 일괄 변경 중 플래그 (worker가 중복 재시작하지 않도록)
-let ipChangeInProgress = false;
+/** 복구 백오프·캡. 무한 스핀(3초 간격 15시간, 로그 350MB)을 막는 경계값이다. */
+const RECOVER_BACKOFF_BASE_MS = 3_000;
+const RECOVER_BACKOFF_MAX_MS = 5 * 60_000;
+const FAILURE_CAP = 5;
+/** 보류 해제(재활) 주기 — parked/zombie 를 다시 시도한다 */
+const REHAB_INTERVAL_MS = 10 * 60_000;
+/** 정지 요청 후 루프 드레인 상한. 초과하면 남은 루프를 버리되, 세대 토큰이 부활을 막는다 */
+const DRAIN_DEADLINE_MS = 20_000;
+
+/**
+ * 실행 세대. `startCrawling` 마다 증가하며 모든 루프가 자기 세대를 확인한다.
+ * 이전 구현은 `setRunning(true)` 가 stop 플래그를 꺼서, 드레인되지 않은 구 세대 워커가
+ * 되살아나 같은 브라우저를 두 세트가 구동했다.
+ */
+let currentRunId = 0;
+/** 리컨실 주기. IP 교체 경로에 의존하지 않는 독립 타이머여야 고갈 상태에서도 self-heal 이 돈다 */
+const RECONCILE_INTERVAL_MS = 60_000;
 
 // 브라우저 죽음을 감지하는 에러 패턴
 const DEAD_BROWSER_PATTERNS = [
@@ -158,12 +193,34 @@ const DEAD_BROWSER_PATTERNS = [
 
 /**
  * =====================================================
- * Browser Worker (Consumer) - DDD 패턴 적용
+ * Browser Worker (Consumer)
  * =====================================================
- * 각 브라우저가 독립적으로 Task Queue에서 Task를 가져와 처리
- * BrowserHolder를 통해 프로필 재생성 시 새 인스턴스로 교체 가능
+ * 각 브라우저가 독립적으로 Task Queue에서 Task를 가져와 처리.
+ * BrowserHolder 를 통해 프로필 재생성 시 새 인스턴스로 교체 가능.
+ *
+ * 워커 하나의 예외가 전체를 무너뜨리지 않도록 격리한다. 이전 구현은 예외가 `Promise.all` 을
+ * reject 시켜 `startCrawling` 이 throw 하고, finally 가 running=false 로 만든 뒤에도
+ * 나머지 14 워커·fetcher·keepalive 가 계속 돌아 정지 불가 좀비가 됐다.
  */
 async function browserWorker(
+  holder: BrowserHolder,
+  workerIndex: number,
+  taskQueue: TaskQueueManager,
+): Promise<void> {
+  try {
+    await runBrowserWorker(holder, workerIndex, taskQueue);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[Worker ${workerIndex}] ${holder.browser.getProfileName()} 워커 종료(격리): ${detail}`,
+    );
+    holder.browser.updateStatus("error", `워커 예외: ${detail}`);
+    // 이 슬롯만 보류시킨다 — 재활 타이머가 되살린다.
+    suspendHolder(holder, "parked", `워커 예외: ${detail}`);
+  }
+}
+
+async function runBrowserWorker(
   holder: BrowserHolder,
   workerIndex: number,
   taskQueue: TaskQueueManager,
@@ -179,22 +236,24 @@ async function browserWorker(
     const browser = holder.browser;
     const profileName = browser.getProfileName();
 
-    // IP 일괄 변경 중이면 대기 (taskFetcher가 changeAllBrowserIPs 수행 중)
-    if (ipChangeInProgress) {
+    // 보류 슬롯은 재활 타이머가 되살릴 때까지 건드리지 않는다.
+    // (이전 구현은 error 상태를 3초마다 무한 재시도해 스핀을 만들었다)
+    if (holder.suspended !== "none") {
       await delay(3000);
       continue;
     }
 
-    // 재시작 중이면 대기
-    if (browser.getStatus().status === "restarting") {
+    // 재시작/기동 중이면 대기 — 실제 상호배제는 profileId 락이 보장하고,
+    // 이 검사는 불필요한 락 경합을 줄이는 최적화다.
+    const currentStatus = browser.getStatus().status;
+    if (currentStatus === "restarting" || currentStatus === "starting") {
       await delay(3000);
       continue;
     }
 
-    // 브라우저 에러 시 자동 복구 시도
+    // 브라우저 에러 시 자동 복구 시도 (백오프 준수)
     if (browser.hasError()) {
-      // IP 일괄 변경 직후 에러 상태면 무시 (changeAllBrowserIPs가 이미 처리)
-      if (ipChangeInProgress) {
+      if (Date.now() < holder.nextAttemptAt) {
         await delay(3000);
         continue;
       }
@@ -202,10 +261,9 @@ async function browserWorker(
       const cat = logRestart({ profileName, workerIndex, reason: "브라우저 에러 복구", errorMsg: errorInfo });
       incrementStat(cat);
       if (!shouldStop()) {
-        await handleBrowserRestart(holder, workerIndex, `브라우저 에러 복구 [${cat}]`);
+        await recoverBrowser(holder, workerIndex, `브라우저 에러 복구 [${cat}]`);
       }
       consecutiveDeadErrors = 0;
-      // 복구 후 잠시 대기
       await delay(3000);
       continue;
     }
@@ -238,7 +296,7 @@ async function browserWorker(
       browser.completeCrawling("error", healthErr.message);
       const cat = logRestart({ profileName, workerIndex, reason: "태스크 전 health check 실패", errorMsg: healthErr.message });
       incrementStat(cat);
-      await handleBrowserRestart(holder, workerIndex, `health check 실패 [${cat}]`);
+      await recoverBrowser(holder, workerIndex, `health check 실패 [${cat}]`);
       continue;
     }
 
@@ -276,7 +334,7 @@ async function browserWorker(
       if (result.captchaDetected && !shouldStop()) {
         logRestart({ profileName, workerIndex, reason: "CAPTCHA 감지", category: "CAPTCHA" });
         incrementStat("CAPTCHA");
-        await handleBrowserRecreation(holder, workerIndex, "CAPTCHA 감지");
+        await recreateBrowserProfile(holder, workerIndex, "CAPTCHA 감지");
       }
     } catch (error: any) {
       // 예외 발생 시 실패 처리
@@ -334,7 +392,7 @@ async function browserWorker(
           consecutiveDeadErrors = 0;
           const cat = logRestart({ profileName, workerIndex, reason: "브라우저 프로세스 죽음", errorMsg });
           incrementStat(cat);
-          await handleBrowserRestart(
+          await recoverBrowser(
             holder,
             workerIndex,
             `브라우저 프로세스 죽음 [${cat}]`,
@@ -368,11 +426,15 @@ async function browserWorker(
         const cat = logRestart({ profileName, workerIndex, reason: errorMsg, errorMsg });
         incrementStat(cat);
 
-        if (cat === "BLOCKED" || cat === "CAPTCHA") {
-          // BLOCKED: 프로필 재생성 (새 fingerprint + 새 proxy)
-          await handleBrowserRecreation(holder, workerIndex, `${cat}: ${errorMsg}`);
+        // 프로필이 사라진 경우는 프록시 로테이션으로 고칠 수 없다 → 재생성.
+        // (이전 구현은 이걸 구분하지 못해 10회 프록시 로테이션을 영구 반복했다 — 인시던트 #2)
+        if (error instanceof ProfileGoneError) {
+          await recreateBrowserProfile(holder, workerIndex, `프로필 소멸: ${error.rawMessage}`);
+        } else if (cat === "BLOCKED" || cat === "CAPTCHA") {
+          // 차단은 지문까지 바꿔야 한다 → 프로필 재생성
+          await recreateBrowserProfile(holder, workerIndex, `${cat}: ${errorMsg}`);
         } else {
-          await handleBrowserRestart(holder, workerIndex, `${cat}: ${errorMsg}`);
+          await recoverBrowser(holder, workerIndex, `${cat}: ${errorMsg}`);
         }
       }
     }
@@ -388,161 +450,218 @@ async function browserWorker(
   }
 }
 
-/**
- * 브라우저 재시작 처리 (프록시만 교체)
- * - 새 프록시로 시작 시도 (그룹별)
- * - 실패하면 다른 프록시로 재시도 (최대 10회)
- * - 죽은 브라우저, 네트워크 오류, IP 변경 모두 이 함수로 복구
- */
-async function handleBrowserRestart(
-  holder: BrowserHolder,
-  workerIndex: number,
-  reason: string,
-): Promise<void> {
-  const maxProxyRetries = 10;
-  const proxyPool = getProxyPool();
-  const browser = holder.browser;
-  const profileName = browser.getProfileName();
-  const groupId = browser.getProxyGroupId();
-  const groupName = browser.getProxyGroupName();
-
-  for (let proxyAttempt = 1; proxyAttempt <= maxProxyRetries; proxyAttempt++) {
-    // 중지 요청 시 즉시 종료
-    if (shouldStop()) {
-      console.log(
-        `[Worker ${workerIndex}] ${profileName} - 중지 요청으로 재시작 취소`,
-      );
-      return;
-    }
-
-    browser.updateStatus(
-      "restarting",
-      `${reason} - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}...`,
-    );
-
-    try {
-      // 기존 Proxy를 active로 복귀 (round-robin 순환으로 자연 쿨다운)
-      const oldProxyId = browser.getProxyId();
-      if (oldProxyId) {
-        proxyPool.releaseProxy(oldProxyId, groupId);
-      }
-
-      // 그룹별 새 Proxy 할당
-      const newProxy =
-        groupId !== undefined
-          ? proxyPool.getNextProxyByGroup(groupId)
-          : proxyPool.getNextProxy();
-
-      if (!newProxy) {
-        console.log(
-          `[Worker ${workerIndex}] ${profileName} [${groupName || "default"}] - 프록시 없음`,
-        );
-        browser.updateStatus(
-          "error",
-          `No available proxies in group ${groupName || "default"}`,
-        );
-        return;
-      }
-
-      console.log(
-        `[Worker ${workerIndex}] ${profileName} [${groupName || "default"}] - 프록시 시도 ${proxyAttempt}/${maxProxyRetries}: ${newProxy.ip}:${newProxy.port}`,
-      );
-
-      // 브라우저 재시작 (새 Proxy로, getNextProxy에서 이미 in_use로 마킹됨)
-      await browser.restart(newProxy);
-
-      console.log(
-        `[Worker ${workerIndex}] ${profileName} [${groupName || "default"}] - ✓ 재시작 완료: ${newProxy.ip}:${newProxy.port}`,
-      );
-      return;
-    } catch (error: any) {
-      console.log(
-        `[Worker ${workerIndex}] ${profileName} [${groupName || "default"}] - ✗ 프록시 시도 ${proxyAttempt} 실패: ${error.message}`,
-      );
-
-      // 재시작 전 잠시 대기 (1.5초)
-      await delay(1500);
-    }
-  }
-
-  // 모든 프록시 시도 실패
-  console.log(
-    `[Worker ${workerIndex}] ${profileName} [${groupName || "default"}] - ${maxProxyRetries}개 프록시 모두 실패`,
+/** 실패를 기록하고 지수 백오프를 건다. */
+function noteFailure(holder: BrowserHolder, workerIndex: number, error: unknown, reason: string): void {
+  holder.failures++;
+  const wait = Math.min(
+    RECOVER_BACKOFF_BASE_MS * 2 ** (holder.failures - 1),
+    RECOVER_BACKOFF_MAX_MS,
   );
-  browser.updateStatus("error", `${maxProxyRetries}개 프록시 모두 실패`);
+  holder.nextAttemptAt = Date.now() + wait;
+  const detail = error instanceof Error ? error.message : String(error);
+  console.log(
+    `[Worker ${workerIndex}] ${holder.browser.getProfileName()} 복구 실패 ` +
+      `${holder.failures}/${FAILURE_CAP} (${Math.round(wait / 1000)}s 후 재시도) [${reason}]: ${detail}`,
+  );
+}
+
+/** 슬롯을 보류시킨다. 종점이 아니라 재활 대기 상태다. */
+function suspendHolder(holder: BrowserHolder, kind: "parked" | "zombie", detail: string): void {
+  holder.suspended = kind;
+  holder.nextAttemptAt = Date.now() + REHAB_INTERVAL_MS;
+  const label = kind === "zombie" ? "정지 미확인 격리" : "보류";
+  holder.browser.updateStatus("error", `${label}: ${detail}`);
+  console.warn(`[Crawler] ${holder.browser.getProfileName()} → ${kind} (${detail})`);
 }
 
 /**
- * CAPTCHA 차단 시 프로필 재생성 (새 fingerprint + 새 proxy = 완전한 새 identity)
- * 실패 시 폴백: 프록시만 변경하는 일반 재시작
+ * 브라우저 복구 (프록시 교체 + 재기동).
+ *
+ * 이전 구현(handleBrowserRestart)의 결함을 모두 제거했다:
+ *  - 호출자가 프록시를 먼저 획득하고 `browser.restart()` 가 "이미 재시작 중"이면 아무것도 하지 않고
+ *    성공 반환해서, 획득한 프록시가 주인 없이 남았다(사이클당 +1 영구 누수). → profileId 락으로
+ *    직렬화하므로 그런 경로가 없다.
+ *  - 정지를 확인하지 않고 프록시를 반납했다. → 확인된 정지 후에만 반납한다.
+ *  - 실패해도 10회 재시도를 무한 반복했다. → 백오프 + 캡 + 재생성 1회 에스컬레이션 + 보류.
+ *  - 브로커 장애를 프록시 문제로 오인해 로테이션했다. → 브레이커가 열려 있으면 로테이션하지 않는다.
  */
-async function handleBrowserRecreation(
+async function recoverBrowser(
   holder: BrowserHolder,
   workerIndex: number,
   reason: string,
 ): Promise<void> {
-  const browserManager = getBrowserManager();
-  const proxyPool = getProxyPool();
-  const oldBrowser = holder.browser;
-  const profileName = oldBrowser.getProfileName();
-  const groupId = oldBrowser.getProxyGroupId();
-  const groupName = oldBrowser.getProxyGroupName();
+  if (holder.suspended !== "none" || shouldStop()) return;
+  if (Date.now() < holder.nextAttemptAt) return;
 
-  console.log(
-    `[Worker ${workerIndex}] ${profileName} - ${reason}: 프로필 재생성 시작`,
-  );
-  oldBrowser.updateStatus("restarting", `${reason} - 프로필 재생성 중...`);
+  // 브로커가 죽었으면 프록시를 바꿔도 낫지 않는다. 로테이션으로 프록시 대역만 태우지 않는다.
+  if (adsPowerQueue.breakerState() === "open") {
+    suspendHolder(holder, "parked", `브로커 차단(브레이커 open) — ${reason}`);
+    return;
+  }
 
-  try {
-    // 1. 프로필 재생성 (AdsPower: 구 삭제 + 신 생성)
-    const newBrowser = await browserManager.recreateProfile(oldBrowser);
-
-    // holder 를 새 인스턴스로 즉시 교체: 이후 프록시 설정/시작이 broker 로 실패해도
-    // worker·폴백(handleBrowserRestart)이 삭제된 구 프로필이 아니라 유효한 새 프로필을
-    // 사용하게 하여 '삭제된 프로필 무한 재시작 + 프록시 누수' 를 방지한다.
-    holder.browser = newBrowser;
-
-    // 헌 브라우저가 쥐고 있던 프록시 반환(누수 방지). 새 브라우저는 아래에서 새 프록시를 받는다.
-    const oldProxyId = oldBrowser.getProxyId();
-    if (oldProxyId !== undefined) {
-      proxyPool.releaseProxy(oldProxyId, groupId);
-    }
-
-    // 2. 새 프록시 할당
-    const newProxy =
-      groupId !== undefined
-        ? proxyPool.getNextProxyByGroup(groupId)
-        : proxyPool.getNextProxy();
-
-    if (!newProxy) {
-      console.log(`[Worker ${workerIndex}] ${profileName} - 새 프록시 없음`);
-      newBrowser.updateStatus(
-        "error",
-        `No available proxies in group ${groupName || "default"}`,
-      );
+  if (holder.failures >= FAILURE_CAP) {
+    if (!holder.escalated) {
+      holder.escalated = true;
+      await recreateBrowserProfile(holder, workerIndex, `연속 복구 실패 ${holder.failures}회`);
       return;
     }
+    suspendHolder(holder, "parked", `연속 복구 실패 ${holder.failures}회`);
+    return;
+  }
 
-    // 3. 프록시 설정 + 브라우저 시작 (getNextProxy에서 이미 in_use로 마킹됨)
-    await newBrowser.updateProxySettings(newProxy);
+  const pool = getProxyPool();
+  const profileId = holder.browser.getProfileId();
 
-    await newBrowser.start({
-      validateProxy: false,
-      validateConnection: false,
+  try {
+    await getLifecycleLock().run(profileId, async () => {
+      const browser = holder.browser;
+      const groupId = browser.getProxyGroupId();
+
+      // 1) 확인된 정지. 확인 못하면 lease 를 반납하지 않고 격리한다.
+      try {
+        await browser.stop();
+      } catch (error: unknown) {
+        if (error instanceof StopUnconfirmedError) {
+          suspendHolder(holder, "zombie", error.message);
+          return;
+        }
+        throw error;
+      }
+
+      // 2) 새 lease 확보. 고갈은 브라우저의 결함이 아니므로 실패로 집계하지 않고,
+      //    보유 중인 lease 가 있으면 그것으로 재기동한다(회전은 최적화일 뿐이다).
+      const held = browser.getLease();
+      const fresh = pool.acquire(profileId, groupId);
+      const target = fresh ?? held;
+      if (!target) {
+        holder.nextAttemptAt = Date.now() + RECOVER_BACKOFF_BASE_MS;
+        browser.updateStatus("waiting", "프록시 고갈 — 대기");
+        return;
+      }
+      // 새 것을 확보한 뒤에만 헌 것을 반납한다.
+      if (fresh && held && held.proxyId !== fresh.proxyId) pool.release(held);
+
+      // 3) 적용 + 기동
+      await browser.startWithLease(target);
+      holder.failures = 0;
+      holder.escalated = false;
+      holder.nextAttemptAt = 0;
+      console.log(
+        `[Worker ${workerIndex}] ${browser.getProfileName()} ✓ 복구 완료 ${target.ip}:${target.port}`,
+      );
     });
+  } catch (error: unknown) {
+    if (error instanceof ProfileGoneError) {
+      await recreateBrowserProfile(holder, workerIndex, `프로필 소멸: ${error.rawMessage}`);
+      return;
+    }
+    noteFailure(holder, workerIndex, error, reason);
+  }
+}
 
+/**
+ * 프로필 재생성 (새 지문 + 새 프록시).
+ * 차단/캡차, 프로필 소멸, 복구 실패 캡 도달 시의 경로.
+ *
+ * 헌 브라우저의 lease 를 반드시 회수한다 — 이전 구현은 재생성 성공 경로에서 이걸 놓쳐
+ * 재생성마다 프록시 1개가 영구 고아로 남았다.
+ */
+async function recreateBrowserProfile(
+  holder: BrowserHolder,
+  workerIndex: number,
+  reason: string,
+): Promise<void> {
+  if (shouldStop()) return;
+  const pool = getProxyPool();
+  const manager = getBrowserManager();
+  const oldProfileId = holder.browser.getProfileId();
+
+  console.log(`[Worker ${workerIndex}] ${holder.browser.getProfileName()} - 프로필 재생성: ${reason}`);
+
+  try {
+    await getLifecycleLock().run(oldProfileId, async () => {
+      const old = holder.browser;
+      const groupId = old.getProxyGroupId();
+
+      // recreateProfile 은 정지 확인 → 삭제 → 생성 순서다.
+      // 정지를 확인하지 못하면 던지므로, 여기서 잡아 zombie 로 격리한다.
+      const replacement = await manager.recreateProfile(old);
+
+      // 정지가 확인된 뒤이므로 헌 lease 를 안전하게 반납할 수 있다.
+      const stranded = old.takeLease();
+      if (stranded) pool.release(stranded);
+
+      holder.browser = replacement;
+
+      const fresh = pool.acquire(replacement.getProfileId(), groupId);
+      if (!fresh) {
+        replacement.updateStatus("waiting", "프록시 고갈 — 대기");
+        holder.nextAttemptAt = Date.now() + RECOVER_BACKOFF_BASE_MS;
+        return;
+      }
+      await replacement.startWithLease(fresh);
+      holder.failures = 0;
+      holder.suspended = "none";
+      holder.nextAttemptAt = 0;
+      console.log(
+        `[Worker ${workerIndex}] ${replacement.getProfileName()} ✓ 재생성 완료 ` +
+          `(${replacement.getProfileId()}) ${fresh.ip}:${fresh.port}`,
+      );
+    });
+  } catch (error: unknown) {
+    if (error instanceof StopUnconfirmedError) {
+      suspendHolder(holder, "zombie", error.message);
+      return;
+    }
+    if (error instanceof QuotaError) {
+      suspendHolder(holder, "parked", `프로필 한도: ${error.rawMessage}`);
+      return;
+    }
+    noteFailure(holder, workerIndex, error, reason);
+  }
+}
+
+/**
+ * 재활 — 보류(parked/zombie) 슬롯을 되살린다.
+ * 조건이 여전하면 복구 경로가 다시 보류시키므로, 일시 장애만 자동 회복된다.
+ */
+function rehabilitateHolders(holders: readonly BrowserHolder[]): void {
+  if (adsPowerQueue.breakerState() === "open") return;
+  const now = Date.now();
+  for (const holder of holders) {
+    if (holder.suspended === "none") continue;
+    if (now < holder.nextAttemptAt) continue;
     console.log(
-      `[Worker ${workerIndex}] ${profileName} - ✓ 프로필 재생성 완료 (${newBrowser.getProfileId()}) proxy: ${newProxy.ip}:${newProxy.port}`,
+      `[Crawler] ${holder.browser.getProfileName()} 재활 시도 (이전 상태: ${holder.suspended})`,
     );
-  } catch (error: any) {
-    console.log(
-      `[Worker ${workerIndex}] ${profileName} - ✗ 프로필 재생성 실패: ${error.message}, 프록시만 변경으로 폴백`,
-    );
-    // 폴백: 기존 프로필로 프록시만 변경
-    await handleBrowserRestart(
-      holder,
-      workerIndex,
-      `${reason} (재생성 실패, 프록시 변경)`,
+    holder.suspended = "none";
+    holder.failures = 0;
+    holder.escalated = false;
+    holder.nextAttemptAt = 0;
+    holder.browser.updateStatus("idle", "재활 — 복구 대기");
+  }
+}
+
+/**
+ * 리소스 리컨실 — 고아 lease 와 고아 프로필을 회수한다.
+ * **독립 타이머에서 호출해야 한다.** 이전 완화책은 IP 교체 경로에서만 호출됐고,
+ * 풀이 고갈되면 fetcher 가 영구 블록되어 정작 필요한 순간에 도달하지 못했다.
+ */
+async function reconcileResources(holders: readonly BrowserHolder[]): Promise<void> {
+  const live: ProxyLease[] = [];
+  for (const holder of holders) {
+    const lease = holder.browser.getLease();
+    if (lease) live.push(lease);
+  }
+  getProxyPool().reconcile(live);
+
+  const owned = new Set(holders.map((h) => h.browser.getProfileId()));
+  try {
+    const deleted = await getBrowserManager().reconcileGroupProfiles(owned);
+    if (deleted > 0) console.warn(`[Crawler] 고아 프로필 ${deleted}개 삭제`);
+  } catch (error: unknown) {
+    console.warn(
+      `[Crawler] 프로필 리컨실 실패(무시): ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
@@ -566,15 +685,15 @@ async function taskFetcher(
 ): Promise<void> {
   const browserCount = holders.length;
   const limit = browserCount * 100;
-  const proxyPool = getProxyPool();
   const REST_DURATION = 1 * 60 * 1000; // 1분 휴식
-
-  // 최초 시작 시 모든 프록시 활성화 (준비 단계에서 프록시 미할당)
-  proxyPool.resetAllProxies();
+  /**
+   * 배치 완료 대기 상한. 이전 구현은 상한이 없어, 풀이 고갈되어 워커가 태스크를 못 집으면
+   * `isAllCompleted()` 가 영원히 false 가 되고 fetcher 가 영구 블록됐다. 그러면 IP 교체도
+   * 안 돌고 — 당시 리컨실이 그 경로에만 있었으므로 — self-heal 자체가 도달 불가였다.
+   */
+  const BATCH_DEADLINE_MS = 45 * 60 * 1000;
 
   while (!shouldStop()) {
-    // 매 루프 시작 시 dead 프록시만 복원 (in_use는 유지 — 현재 사용 중인 프록시 보호)
-    proxyPool.resetDeadProxies();
 
     // 태스크 가져오기
     console.log(
@@ -595,7 +714,7 @@ async function taskFetcher(
     // 태스크 도착 → 전체 브라우저 IP 일괄 변경
     console.log(`[TaskFetcher] ${tasks.length} tasks received. Changing all browser IPs...`);
     setWaitState(Date.now() + 30 * 1000, "브라우저 IP 일괄 변경 중...");
-    await changeAllBrowserIPs(holders);
+    await rotateAllProxies(holders);
     clearWaitState();
     console.log(`[TaskFetcher] IP change completed. Starting in 5 seconds...`);
 
@@ -612,9 +731,20 @@ async function taskFetcher(
     taskQueue.addTasks(tasks);
     console.log(`[TaskFetcher] Added ${tasks.length} tasks to queue`);
 
-    // 모든 작업 완료 대기 (큐 비어있고 처리중인 것도 없음)
+    // 모든 작업 완료 대기 — 반드시 상한을 둔다(워치독).
     console.log(`[TaskFetcher] Waiting for all tasks to complete...`);
+    const batchDeadline = Date.now() + BATCH_DEADLINE_MS;
     while (!shouldStop() && !taskQueue.isAllCompleted()) {
+      if (Date.now() > batchDeadline) {
+        const stuck = holders
+          .filter((h) => h.suspended !== "none" || h.browser.hasError())
+          .map((h) => `${h.browser.getProfileName()}:${h.suspended}/${h.browser.getStatus().status}`);
+        console.warn(
+          `[TaskFetcher] 배치 데드라인 초과 — 강제 진행. 정체 슬롯: ${stuck.join(" ") || "(없음)"}`,
+        );
+        taskQueue.reset();
+        break;
+      }
       await delay(5000);
     }
 
@@ -635,152 +765,67 @@ async function taskFetcher(
 }
 
 /**
- * 모든 브라우저의 IP를 일괄 변경 (병렬 처리, concurrency=10)
- * 죽은 브라우저도 이 과정에서 복구됨 (restart가 stop → start 수행)
+ * 전체 브라우저 프록시 일괄 회전.
+ *
+ * 이전 구현(changeAllBrowserIPs)은 Phase 1 에서 전체를 정지시키고 Phase 2 에서 재배정했다.
+ * 모델 검증에서 반증됨: 두 페이즈 사이에 워커가 브라우저를 다시 start 하면, Phase 2 는
+ * "이미 정지됨"을 전제로 **살아있는 브라우저의 프록시를 해제**해 I3(트래픽 정합)이 깨졌다.
+ * 따라서 페이즈 간 전제를 없애고, **브라우저별 락 안에서 정지 확인 → 재배정 → 기동**을
+ * 자기완결적으로 수행한다. 회전 실패는 park 하지 않고 다음 사이클에 다시 시도한다.
  */
-async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
-  const proxyPool = getProxyPool();
-  const BATCH_SIZE = 10;
-  const maxRetries = 5;
+async function rotateAllProxies(holders: BrowserHolder[]): Promise<void> {
+  const pool = getProxyPool();
+  const CONCURRENCY = 5;
 
-  console.log(
-    `[IPChange] Starting IP change for ${holders.length} browsers (batch size: ${BATCH_SIZE}, max retries: ${maxRetries})`,
-  );
+  console.log(`[Rotate] ${holders.length}개 브라우저 프록시 회전 시작`);
 
-  // worker가 중복 재시작하지 않도록 플래그 설정
-  ipChangeInProgress = true;
+  for (let start = 0; start < holders.length; start += CONCURRENCY) {
+    if (shouldStop()) return;
+    const batch = holders.slice(start, start + CONCURRENCY);
 
-  // ===== Phase 1: 모든 브라우저 일괄 종료 =====
-  // Puppeteer 연결 즉시 해제 (API 호출 없이)
-  for (const holder of holders) {
-    holder.browser.disconnectOnly();
-  }
-
-  // AdsPower 브라우저 종료 — 자기 프로필만 개별 종료(공유 AdsPower 에서 타 앱 브라우저 보호).
-  //  ⚠️ 인스턴스 전체 stop-all(/api/v2/.../stop-all)은 prowler 등 다른 앱 브라우저까지 끄므로 사용 금지.
-  const apiKey = holders[0]?.browser.getApiKey();
-  if (apiKey) {
-    await Promise.all(
-      holders.map((h) =>
-        adsPowerQueue
-          .stopBrowser(apiKey, h.browser.getProfileId())
-          .catch((e) =>
-            console.log(`[IPChange] stop 실패 ${h.browser.getProfileId()} (무시): ${e instanceof Error ? e.message : String(e)}`),
-          ),
-      ),
-    );
-    console.log(`[IPChange] ${holders.length}개 브라우저 개별 종료 (자기 프로필만)`);
-  }
-
-  // 브라우저들이 완전히 종료될 때까지 잠시 대기
-  await delay(2000);
-
-  // ===== Phase 2: 프록시 변경 + 재시작 =====
-  for (
-    let batchStart = 0;
-    batchStart < holders.length;
-    batchStart += BATCH_SIZE
-  ) {
-    const batchEnd = Math.min(batchStart + BATCH_SIZE, holders.length);
-    const batch = holders.slice(batchStart, batchEnd);
-
-    if (batchStart > 0) {
-      console.log(`[IPChange] Waiting 5s before next batch...`);
-      await delay(5000);
-    }
-
-    console.log(
-      `[IPChange] Processing batch ${batchStart + 1}-${batchEnd}/${holders.length}`,
-    );
-
-    await Promise.all(
+    await Promise.allSettled(
       batch.map(async (holder) => {
-        const browser = holder.browser;
-        const groupId = browser.getProxyGroupId();
-        const groupName = browser.getProxyGroupName();
-        const profileName = browser.getProfileName();
+        if (holder.suspended !== "none") return;
+        const profileId = holder.browser.getProfileId();
+        try {
+          await getLifecycleLock().run(profileId, async () => {
+            const browser = holder.browser;
+            const groupId = browser.getProxyGroupId();
 
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          if (shouldStop()) return;
-
-          try {
-            // 기존 Proxy를 active로 복귀 (round-robin 순환으로 자연 쿨다운)
-            const oldProxyId = browser.getProxyId();
-            if (oldProxyId) {
-              proxyPool.releaseProxy(oldProxyId, groupId);
+            try {
+              await browser.stop();
+            } catch (error: unknown) {
+              if (error instanceof StopUnconfirmedError) {
+                suspendHolder(holder, "zombie", error.message);
+                return;
+              }
+              throw error;
             }
 
-            // 그룹별 새 Proxy 할당
-            const newProxy =
-              groupId !== undefined
-                ? proxyPool.getNextProxyByGroup(groupId)
-                : proxyPool.getNextProxy();
-
-            if (!newProxy) {
-              console.log(
-                `[IPChange] ${profileName} [${groupName || "default"}] - No available proxies`,
-              );
-              browser.updateStatus(
-                "error",
-                `No available proxies in group ${groupName || "default"}`,
-              );
+            const held = browser.getLease();
+            const fresh = pool.acquire(profileId, groupId);
+            const target = fresh ?? held;
+            if (!target) {
+              // 고갈은 실패가 아니다 — 회전을 건너뛰고 다음 사이클을 기다린다.
+              browser.updateStatus("waiting", "프록시 고갈 — 회전 건너뜀");
               return;
             }
+            if (fresh && held && held.proxyId !== fresh.proxyId) pool.release(held);
 
-            console.log(
-              `[IPChange] ${profileName} [${groupName || "default"}] - 프록시 시도 ${attempt}/${maxRetries}: ${newProxy.ip}:${newProxy.port}`,
-            );
-
-            // 프록시 설정 변경 + 브라우저 시작 (이미 종료된 상태이므로 stop 불필요)
-            logRestart({ profileName, workerIndex: -1, reason: "IP 일괄 변경", category: "IP_CHANGE" });
-            incrementStat("IP_CHANGE");
-            await browser.startWithNewProxy(newProxy);
-
-            console.log(
-              `[IPChange] ${profileName} [${groupName || "default"}] - ✓ IP change completed: ${newProxy.ip}:${newProxy.port}`,
-            );
-            return; // 성공 시 루프 종료
-          } catch (error: any) {
-            console.log(
-              `[IPChange] ${profileName} [${groupName || "default"}] - ✗ 시도 ${attempt}/${maxRetries} 실패: ${error.message}`,
-            );
-
-            if (attempt < maxRetries) {
-              await delay(1500);
-            }
-          }
+            await browser.startWithLease(target);
+            console.log(`[Rotate] ${browser.getProfileName()} ✓ ${target.ip}:${target.port}`);
+          });
+        } catch (error: unknown) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.log(`[Rotate] ${holder.browser.getProfileName()} ✗ ${detail}`);
+          holder.browser.updateStatus("error", `회전 실패: ${detail}`);
         }
-
-        // 모든 재시도 실패
-        console.log(
-          `[IPChange] ${profileName} [${groupName || "default"}] - ${maxRetries}회 모두 실패`,
-        );
-        browser.updateStatus(
-          "error",
-          `IP change failed after ${maxRetries} retries`,
-        );
       }),
     );
   }
 
-  // 리컨실리에이션(self-heal): IP 일괄교체 회계 오차로 표류한 고아 in_use 프록시 회수.
-  // 살아있는 브라우저가 실제 소유한 proxyId 만 in_use 로 남기고 나머지는 active 로 되돌린다.
-  const ownedProxyIds = new Set(
-    holders
-      .map((h) => h.browser.getProxyId())
-      .filter((id): id is number => id !== undefined),
-  );
-  proxyPool.reconcileInUse(ownedProxyIds, holders[0]?.browser.getProxyGroupId());
-
-  // 플래그 해제 — worker가 다시 에러 감지 및 복구 가능
-  ipChangeInProgress = false;
-
-  const successCount = holders.filter(
-    (h) => h.browser.getStatus().status !== "error",
-  ).length;
-  console.log(
-    `[IPChange] IP change completed: ${successCount}/${holders.length} browsers ready`,
-  );
+  const ready = holders.filter((h) => h.browser.isReady()).length;
+  console.log(`[Rotate] 완료: ${ready}/${holders.length} 가동`);
 }
 
 /**
@@ -836,7 +881,10 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   setRunning(true);
   resetProgress();
   resetRestartStats();
-  ipChangeInProgress = false;
+  // 이 실행의 세대 토큰. 모든 루프가 이 값을 확인하므로, 정지 후 재시작해도 이전 세대의
+  // 좀비 루프가 부활해 같은 브라우저를 이중으로 구동하는 일이 없다.
+  const runId = ++currentRunId;
+  const alive = (): boolean => runId === currentRunId && !shouldStop();
 
   // 재시작 로거 초기화 (DATA_DIR/logs/restart-YYYY-MM-DD.tsv)
   initRestartLogger(DATA_DIR);
@@ -849,7 +897,13 @@ export async function startCrawling(): Promise<CrawlResult[]> {
   );
 
   // BrowserHolder 배열 생성 (mutable wrapper — 프로필 재생성 시 참조 교체 가능)
-  const holders: BrowserHolder[] = browsers.map((browser) => ({ browser }));
+  const holders: BrowserHolder[] = browsers.map((browser) => ({
+    browser,
+    failures: 0,
+    suspended: "none",
+    nextAttemptAt: 0,
+    escalated: false,
+  }));
 
   // ========================================
   // Step 1: Task Queue Manager 생성
@@ -881,30 +935,62 @@ export async function startCrawling(): Promise<CrawlResult[]> {
 
     // Keepalive 주기적으로 실행
     const keepalivePromise = (async () => {
-      while (!shouldStop()) {
+      while (alive()) {
         await delay(60000); // 1분마다
         await browserManager.keepalive();
       }
     })();
 
+    // 리컨실 타이머 — IP 회전 경로와 독립. 고아 lease/프로필을 주기적으로 회수한다.
+    // 이 독립성이 핵심이다: 이전 완화책은 회전 경로에만 있어서 풀이 고갈되면 도달 불가였다.
+    const reconcilePromise = (async () => {
+      while (alive()) {
+        await delay(RECONCILE_INTERVAL_MS);
+        if (!alive()) break;
+        await reconcileResources(holders);
+      }
+    })();
+
+    // 재활 타이머 — parked/zombie 를 되살린다. 없으면 일시 장애가 영구적 fleet 축소로 굳는다.
+    const rehabPromise = (async () => {
+      while (alive()) {
+        await delay(60_000);
+        if (!alive()) break;
+        rehabilitateHolders(holders);
+      }
+    })();
+
+    const everything = [
+      fetcherPromise,
+      handlerPromise,
+      ...workerPromises,
+      keepalivePromise,
+      reconcilePromise,
+      rehabPromise,
+    ];
+
     // 모든 Workers 대기
     console.log(`[Crawler] All workers started. Waiting for completion...\n`);
-    await Promise.race([
-      Promise.all([
-        fetcherPromise,
-        handlerPromise,
-        ...workerPromises,
-        keepalivePromise,
-      ]),
-      new Promise<void>((resolve) => {
-        const checkStop = setInterval(() => {
-          if (shouldStop()) {
-            clearInterval(checkStop);
-            resolve();
-          }
-        }, 1000);
-      }),
-    ]);
+    const stopWatch = Promise.withResolvers<void>();
+    const stopTimer = setInterval(() => {
+      if (!alive()) stopWatch.resolve();
+    }, 1000);
+    try {
+      await Promise.race([Promise.allSettled(everything), stopWatch.promise]);
+    } finally {
+      clearInterval(stopTimer);
+    }
+
+    // 실제 드레인 — 정지 신호 후 루프들이 끝날 때까지 데드라인 내에서 기다린다.
+    // 이전 구현은 race 로 즉시 반환해 워커·fetcher 를 방치했고, 그 루프들이
+    // 다음 start 의 setRunning(true) 로 stop 플래그가 꺼지면 되살아났다.
+    const drainDeadline = Promise.withResolvers<void>();
+    const drainTimer = setTimeout(() => drainDeadline.resolve(), DRAIN_DEADLINE_MS);
+    try {
+      await Promise.race([Promise.allSettled(everything), drainDeadline.promise]);
+    } finally {
+      clearTimeout(drainTimer);
+    }
   } finally {
     // ========================================
     // Step 4: 정리
@@ -1348,14 +1434,17 @@ function isNaverMainUrl(url: string): boolean {
 }
 
 /**
- * 크롤러 중지 요청
+ * 크롤러 중지 요청.
+ *
+ * `isRunning()` 을 검사하지 않는다. 워커 예외로 `Promise.all` 이 reject 되면 finally 가
+ * `running=false` 로 만들지만 나머지 루프는 계속 돌았고, 그 상태에서 이 함수가 early return 해서
+ * **정지 불가 좀비 크롤러**가 됐다(SIGKILL 만 유효). 정지 요청은 항상 받아들인다.
  */
 export function stopCrawler(): void {
-  if (!isRunning()) {
-    console.log("[Crawler] Crawler is not running");
-    return;
-  }
   requestStop();
+  // 세대 토큰을 올려 남아있는 구 세대 루프가 즉시 종료 조건을 만족하게 한다.
+  currentRunId++;
+  console.log("[Crawler] 정지 요청 — 모든 루프 종료 대기");
 }
 
 /**

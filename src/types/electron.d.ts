@@ -31,12 +31,6 @@ export interface ElectronAPI {
   proxyPool: {
     test: () => Promise<any>;
   };
-  session: {
-    assignProxyToProfile: (apiKey: string, profileId: string, profileName: string) => Promise<any>;
-    assignProxyToAll: (apiKey: string) => Promise<any>;
-    getAll: (apiKey: string) => Promise<any>;
-    replaceProxy: (apiKey: string, profileId: string) => Promise<any>;
-  };
   api: {
     getUrlList: () => Promise<{ success: boolean; data?: any; error?: string }>;
   };
@@ -53,7 +47,10 @@ export interface ElectronAPI {
         error?: string;
       }>;
       readyCount?: number;
+      /** 실제로 시도한 목표치(메모리/프록시 풀 클램프 적용 후) */
       requestedCount?: number;
+      /** env/DB 설정 원본값 */
+      configuredCount?: number;
       warning?: string;
       error?: string;
     }>;
