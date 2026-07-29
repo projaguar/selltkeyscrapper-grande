@@ -502,6 +502,12 @@ async function handleBrowserRecreation(
     // 사용하게 하여 '삭제된 프로필 무한 재시작 + 프록시 누수' 를 방지한다.
     holder.browser = newBrowser;
 
+    // 헌 브라우저가 쥐고 있던 프록시 반환(누수 방지). 새 브라우저는 아래에서 새 프록시를 받는다.
+    const oldProxyId = oldBrowser.getProxyId();
+    if (oldProxyId !== undefined) {
+      proxyPool.releaseProxy(oldProxyId, groupId);
+    }
+
     // 2. 새 프록시 할당
     const newProxy =
       groupId !== undefined
@@ -756,6 +762,15 @@ async function changeAllBrowserIPs(holders: BrowserHolder[]): Promise<void> {
       }),
     );
   }
+
+  // 리컨실리에이션(self-heal): IP 일괄교체 회계 오차로 표류한 고아 in_use 프록시 회수.
+  // 살아있는 브라우저가 실제 소유한 proxyId 만 in_use 로 남기고 나머지는 active 로 되돌린다.
+  const ownedProxyIds = new Set(
+    holders
+      .map((h) => h.browser.getProxyId())
+      .filter((id): id is number => id !== undefined),
+  );
+  proxyPool.reconcileInUse(ownedProxyIds, holders[0]?.browser.getProxyGroupId());
 
   // 플래그 해제 — worker가 다시 에러 감지 및 복구 가능
   ipChangeInProgress = false;

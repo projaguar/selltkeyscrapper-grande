@@ -163,6 +163,37 @@ export class ProxyPool {
   }
 
   /**
+   * 고아 in_use 회수 (self-healing).
+   * 살아있는 브라우저가 실제 소유한 proxyId 집합(ownedProxyIds)에 없는데도 in_use 로
+   * 남아있는 프록시를 active 로 되돌린다. IP 일괄교체/프로필 재생성의 소유권 회계 오차로
+   * 표류(누수)한 프록시를 자가교정한다 → 어떤 경로로 새든 풀 고갈을 방지.
+   * @returns 회수한 프록시 수
+   */
+  reconcileInUse(ownedProxyIds: Set<number>, groupId?: number): number {
+    const rows =
+      groupId !== undefined
+        ? (db.getProxiesByGroup(groupId) as Proxy[])
+        : (db.getProxies() as Proxy[]);
+
+    let reclaimed = 0;
+    for (const proxy of rows) {
+      if (proxy.status === 'in_use' && !ownedProxyIds.has(proxy.id)) {
+        db.updateProxy(proxy.id, { status: 'active' });
+        reclaimed++;
+      }
+    }
+
+    if (reclaimed > 0) {
+      console.log(
+        `[ProxyPool] 리컨실리에이션: 고아 in_use ${reclaimed}개 회수 (group ${groupId ?? 'all'})`,
+      );
+      this.reload();
+      if (groupId !== undefined) this.reloadGroup(groupId);
+    }
+    return reclaimed;
+  }
+
+  /**
    * Proxy를 블록된 상태로 표시 (dead)
    */
   markDead(proxyId: number) {
