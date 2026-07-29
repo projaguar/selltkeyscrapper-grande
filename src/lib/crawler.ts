@@ -979,8 +979,12 @@ async function rotateAllProxies(holders: BrowserHolder[]): Promise<void> {
     );
   }
 
-  const ready = holders.filter((h) => h.browser.isReady()).length;
-  console.log(`[Rotate] 완료: ${ready}/${holders.length} 가동`);
+  // `isReady()`(status==="ready")로 세면 곧바로 waiting/crawling 으로 넘어간 정상 브라우저가
+  // 빠져 "1/15" 처럼 보인다. 가동 여부는 인스턴스 생존 + 보류/에러 아님으로 판정한다.
+  const operational = holders.filter(
+    (h) => h.suspended === "none" && !h.browser.hasError() && h.browser.hasBrowser(),
+  ).length;
+  console.log(`[Rotate] 완료: ${operational}/${holders.length} 가동`);
 }
 
 /**
