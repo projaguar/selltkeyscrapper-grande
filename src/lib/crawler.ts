@@ -54,6 +54,7 @@ import { crawlAuction } from "./crawler/platforms/auction";
 import { getProxyPool, type ProxyLease } from "./proxy-pool";
 import { getLifecycleLock } from "./lifecycle-lock";
 import { ProfileGoneError, QuotaError, StopUnconfirmedError } from "./errors";
+import { verboseLogging } from "./log-budget";
 import {
   initRestartLogger,
   logRestart,
@@ -1474,9 +1475,7 @@ async function navigateToTarget(
     navErr.message = `${navErr.message || "navigation error"} [diag: ${diag}]`;
     throw navErr;
   }
-  console.log(
-    `[Navigate] ${profileName} - ${waitCondition}: ${Date.now() - navStart}ms`,
-  );
+  if (verboseLogging()) console.log(`[Navigate] ${profileName} - ${waitCondition}: ${Date.now() - navStart}ms`);
 
   // URL 검증
   const finalUrl = page.url();
@@ -1520,9 +1519,7 @@ async function navigateToTarget(
       { timeout: 30000 },
     );
     const result = await waitResult.jsonValue();
-    console.log(
-      `[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
-    );
+    if (verboseLogging()) console.log(`[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`);
     if (result === "blocked") {
       logBlocked("AUCTION", profileName);
       throw new Error("Cloudflare block detected - IP change needed");
@@ -1555,9 +1552,7 @@ async function navigateToTarget(
       waitErr.message = `Naver __PRELOADED_STATE__ wait timeout: ${waitErr.message || ""} [diag: ${diag}]`;
       throw waitErr;
     }
-    console.log(
-      `[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`,
-    );
+    if (verboseLogging()) console.log(`[Navigate] ${profileName} - data wait (${result}): ${Date.now() - dataWaitStart}ms | total: ${Date.now() - navStart}ms`);
     if (result === "blocked") {
       logBlocked("NAVER_CAPTCHA", profileName);
       throw new Error("네이버 캡차/차단 감지 - 프로필 재생성 필요");

@@ -6,6 +6,7 @@
  * - 소비자: 각 Worker(브라우저)가 독립적으로 task 가져가서 처리
  */
 
+import { verboseLogging } from '../log-budget';
 import type { CrawlTask, CrawlResult } from "./types";
 import { isUserBlocked } from "./state";
 
@@ -30,7 +31,7 @@ export class TaskQueueManager {
     let skippedByTodayStop = 0;
     while (this.queue.length > 0 && isUserBlocked(this.queue[0].USERNUM)) {
       const skipped = this.queue.shift()!;
-      console.log(`[TaskQueue] Task ${skipped.URLNUM} (${skipped.TARGETSTORENAME}) skipped (todayStop USERNUM: ${skipped.USERNUM})`);
+      if (verboseLogging()) console.log(`[TaskQueue] Task ${skipped.URLNUM} (${skipped.TARGETSTORENAME}) skipped (todayStop USERNUM: ${skipped.USERNUM})`);
       skippedByTodayStop++;
     }
     if (skippedByTodayStop > 0) {
@@ -40,7 +41,7 @@ export class TaskQueueManager {
     const task = this.queue.shift() || null;
     if (task) {
       this.processing.set(task.URLNUM, task);
-      console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) assigned`);
+      if (verboseLogging()) console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) assigned`);
     }
     return { task, skippedByTodayStop };
   }
@@ -51,7 +52,7 @@ export class TaskQueueManager {
   returnTask(task: CrawlTask): void {
     this.processing.delete(task.URLNUM);
     this.queue.unshift(task);
-    console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) returned to queue`);
+    if (verboseLogging()) console.log(`[TaskQueue] Task ${task.URLNUM} (${task.TARGETSTORENAME}) returned to queue`);
   }
 
   /**
@@ -68,7 +69,7 @@ export class TaskQueueManager {
   markComplete(task: CrawlTask, result: CrawlResult): void {
     this.processing.delete(task.URLNUM);
     this.completed.set(task.URLNUM, { task, result });
-    console.log(`[TaskQueue] Task ${task.URLNUM} completed (${result.success ? 'success' : 'failed'})`);
+    if (verboseLogging()) console.log(`[TaskQueue] Task ${task.URLNUM} completed (${result.success ? 'success' : 'failed'})`);
   }
 
   /**

@@ -9,9 +9,10 @@
 
 import type { ServerWebSocket } from "bun";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { totalmem } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { join } from "node:path";
 import { DATA_DIR } from "./data-dir";
+import { startLogBudget } from "./lib/log-budget";
 import * as db from "./database/sqlite";
 import * as adspower from "./services/adspower";
 import * as apiSvc from "./services/api";
@@ -111,6 +112,13 @@ else if (!db.getSetting("adspowerApiKey")) db.setSetting("adspowerApiKey", HARDC
 // 가 동시 가동 인스턴스의 lease 를 파괴했다.
 getProxyPool().reclaimAllAtBoot();
 console.log(`[server] DB: ${DATA_DIR}/data.db`);
+
+// 로그 예산 (§5). launchd 가 stdout/stderr 를 이 파일들로 리다이렉트하므로 앱이 직접 상한을 지킨다.
+// 없으면 0.7GB/일로 자라 약 230일에 디스크가 차고, 그 순간 SQLite 쓰기와 크롤이 함께 멈춘다.
+startLogBudget([
+  join(homedir(), "Library", "Logs", "selltkey-scrapper.out.log"),
+  join(homedir(), "Library", "Logs", "selltkey-scrapper.err.log"),
+]);
 if (!(await Bun.file(`${UI_DIR}/index.html`).exists())) {
   console.warn("[server] ⚠️ dist 빌드가 없습니다 — 대시보드가 안 뜹니다. 'bun run build' 를 먼저 실행하세요.");
 }
