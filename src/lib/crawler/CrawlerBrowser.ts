@@ -23,6 +23,8 @@ const STOP_CONFIRM_INTERVAL_MS = 1_000;
  */
 const PAINT_PROBE_TIMEOUT_MS = 2_500;
 const PAINT_RELOAD_TIMEOUT_MS = 20_000;
+/** 연속 이 횟수만큼 rAF 가 무응답이어야 조치한다(keepalive 주기 60s → 실질 1분 지속 확인). */
+const PAINT_FAIL_STREAK_TO_ACT = 2;
 
 /**
  * puppeteer 는 dynamic import 라 타입을 직접 못 쓴다. 여기서 쓰는 표면만 최소로 선언한다.
@@ -157,6 +159,8 @@ export class CrawlerBrowser {
   /** 페인트 경로 정지 감지·복구 누적 (health 노출) */
   private paintStuckCount = 0;
   private paintRecoveredCount = 0;
+  /** rAF 연속 무응답 횟수. 단발 스로틀을 wedge 로 오판하지 않기 위한 완충. */
+  private paintFailStreak = 0;
 
 
   // ========================================
@@ -684,11 +688,25 @@ export class CrawlerBrowser {
       return;
     }
 
-    if (await this.paintAlive(page)) return;
+    if (await this.paintAlive(page)) {
+      this.paintFailStreak = 0;
+      return;
+    }
+
+    // 1회 실패로는 조치하지 않는다. Chromium 은 가려지거나 디스플레이가 잠든 창의 rAF 를
+    // 스로틀할 수 있어, 단발 무응답을 wedge 로 단정하면 fleet 전체가 동시에 리로드될 수 있다.
+    // (현 구성에서는 15개 전부 rAF 통과를 실측했지만, 환경 변화에 대비한 방어선이다)
+    this.paintFailStreak++;
+    if (this.paintFailStreak < PAINT_FAIL_STREAK_TO_ACT) {
+      console.log(
+        `[CrawlerBrowser] ${this.profileName} - rAF 무응답 ${this.paintFailStreak}회 (연속 ${PAINT_FAIL_STREAK_TO_ACT}회부터 조치)`,
+      );
+      return;
+    }
 
     this.paintStuckCount++;
     console.warn(
-      `[CrawlerBrowser] ${this.profileName} - 페인트 경로 정지 감지(rAF 무응답) — 강제 리로드 시도`,
+      `[CrawlerBrowser] ${this.profileName} - 페인트 경로 정지 확정(rAF 연속 ${this.paintFailStreak}회 무응답) — 강제 리로드`,
     );
     try {
       await page.reload({ waitUntil: "domcontentloaded", timeout: PAINT_RELOAD_TIMEOUT_MS });
@@ -700,12 +718,14 @@ export class CrawlerBrowser {
 
     if (await this.paintAlive(page)) {
       this.paintRecoveredCount++;
+      this.paintFailStreak = 0;
       console.log(`[CrawlerBrowser] ${this.profileName} - ✓ 리로드로 페인트 복구`);
       return;
     }
 
     // 리로드로도 안 되면 브라우저 자체를 재활용해야 한다.
     console.warn(`[CrawlerBrowser] ${this.profileName} - 리로드 후에도 페인트 정지 — 재활용 대상으로 표시`);
+    this.paintFailStreak = 0; // 재활용 경로로 넘기므로 카운터는 초기화
     this.updateStatus("error", "페인트 경로 정지(리로드 실패)");
   }
 
