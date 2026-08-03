@@ -18,6 +18,22 @@ const STOP_CONFIRM_ATTEMPTS = 5;
 const STOP_CONFIRM_INTERVAL_MS = 1_000;
 
 /**
+ * 페인트 경로 프로브. rAF 는 정상이면 1프레임(≈16ms) 안에 발화하므로 2.5s 면 충분히 관대하다.
+ * 실측: 정상 즉시 PAINT_OK, wedge 는 무응답.
+ */
+const PAINT_PROBE_TIMEOUT_MS = 2_500;
+const PAINT_RELOAD_TIMEOUT_MS = 20_000;
+
+/**
+ * puppeteer 는 dynamic import 라 타입을 직접 못 쓴다. 여기서 쓰는 표면만 최소로 선언한다.
+ * (`any` 를 쓰지 않으면서 evaluate/reload 를 타입 안전하게 호출하기 위함)
+ */
+interface PuppeteerPage {
+  evaluate<T>(fn: () => T | Promise<T>): Promise<T>;
+  reload(options: { waitUntil: string; timeout: number }): Promise<unknown>;
+}
+
+/**
  * `{ data: { ws: { puppeteer } } }` 에서 ws 엔드포인트를 안전하게 꺼낸다.
  * 브로커는 게이트웨이 페이지·잘린 본문 등 무엇이든 돌려줄 수 있어 형태 가정이 불가하다.
  */
@@ -138,6 +154,9 @@ export class CrawlerBrowser {
   // 이미지 차단 플래그 (실시간 제어 가능)
   private blockImages: boolean = false;
   private requestInterceptionSetup: boolean = false;
+  /** 페인트 경로 정지 감지·복구 누적 (health 노출) */
+  private paintStuckCount = 0;
+  private paintRecoveredCount = 0;
 
 
   // ========================================
@@ -619,9 +638,21 @@ export class CrawlerBrowser {
   }
 
   /**
-   * Keepalive (WebSocket 연결 유지 + Frame 레벨 죽음 감지)
-   * browser.pages()만으로는 stale frame을 감지할 수 없으므로
-   * page.evaluate()로 실제 frame context가 살아있는지 확인
+   * Keepalive — 연결 생존 + **페인트 경로 생존**까지 확인한다.
+   *
+   * JS 실행만 확인하면 "살아있는데 화면이 안 그려지는" 브라우저를 놓친다. 실측 사례:
+   * 렌더러의 JS 스레드는 멀쩡해 `evaluate` 가 통과하고 CDP 도 URL/title 을 정상 응답하는데
+   * 컴포지터만 wedge 되어 창이 검게 남았다(스크린샷은 타임아웃). 이 상태에서도 크롤은
+   * `__PRELOADED_STATE__` 를 evaluate 로 읽어 계속 되므로 어떤 지표에도 잡히지 않았고,
+   * health 는 `operational` 로 보고했다 — 무인 운영에서 며칠씩 방치될 수 있는 무증상 열화다.
+   *
+   * 탐지는 `requestAnimationFrame` 으로 한다. rAF 콜백은 컴포지터가 프레임을 스케줄해야
+   * 실행되므로 페인트 경로가 막히면 발화하지 않는다(정상 PAINT_OK / wedge TIMEOUT 실측 확인).
+   * 스크린샷 대비 비용이 거의 없다.
+   *
+   * 복구는 **강제 리로드 먼저** 시도한다. wedge 상태에서도 히스토리 네비게이션(goBack)은
+   * 계속 성공하지만 컴포지터를 재사용해 페인트가 돌아오지 않았고, 리로드는 복구시켰다(실측).
+   * 리로드로도 안 되면 error 로 전환해 기존 복구 경로가 브라우저를 재활용하게 한다.
    */
   async keepalive(): Promise<void> {
     if (!this.browser) return;
@@ -637,19 +668,71 @@ export class CrawlerBrowser {
       return;
     }
 
+    let page: PuppeteerPage | undefined;
     try {
       const pages = await this.browser.pages();
-      if (pages.length > 0) {
-        // Frame 레벨 health check: 실제 JavaScript 실행 가능한지 확인
-        await pages[0].evaluate(() => 1);
-      }
+      if (pages.length === 0) return;
+      page = pages[0] as PuppeteerPage;
+      // Frame 레벨 health check: 실제 JavaScript 실행 가능한지 확인
+      await page.evaluate(() => 1);
     } catch {
       // 연결 실패 또는 frame stale → 브라우저 죽음 감지
       console.log(`[CrawlerBrowser] ${this.profileName} - keepalive 실패, 브라우저 죽음 감지`);
       this.browser = undefined;
       this.requestInterceptionSetup = false;
-      this.updateStatus('error', 'Browser process died');
+      this.updateStatus("error", "Browser process died");
+      return;
     }
+
+    if (await this.paintAlive(page)) return;
+
+    this.paintStuckCount++;
+    console.warn(
+      `[CrawlerBrowser] ${this.profileName} - 페인트 경로 정지 감지(rAF 무응답) — 강제 리로드 시도`,
+    );
+    try {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: PAINT_RELOAD_TIMEOUT_MS });
+    } catch (error: unknown) {
+      console.warn(
+        `[CrawlerBrowser] ${this.profileName} - 리로드 실패: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (await this.paintAlive(page)) {
+      this.paintRecoveredCount++;
+      console.log(`[CrawlerBrowser] ${this.profileName} - ✓ 리로드로 페인트 복구`);
+      return;
+    }
+
+    // 리로드로도 안 되면 브라우저 자체를 재활용해야 한다.
+    console.warn(`[CrawlerBrowser] ${this.profileName} - 리로드 후에도 페인트 정지 — 재활용 대상으로 표시`);
+    this.updateStatus("error", "페인트 경로 정지(리로드 실패)");
+  }
+
+  /**
+   * 페인트 경로 생존 확인. rAF 콜백은 컴포지터가 프레임을 스케줄해야만 실행된다.
+   * 타임아웃/예외는 모두 "살아있지 않음"으로 본다(보수적 판정).
+   */
+  private async paintAlive(page: PuppeteerPage): Promise<boolean> {
+    try {
+      const probe = page.evaluate(
+        () => new Promise<boolean>((resolve) => requestAnimationFrame(() => resolve(true))),
+      );
+      const timeout = Promise.withResolvers<boolean>();
+      const timer = setTimeout(() => timeout.resolve(false), PAINT_PROBE_TIMEOUT_MS);
+      try {
+        return await Promise.race([probe, timeout.promise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /** 페인트 정지 감지·복구 횟수 (health 노출용) */
+  paintStats(): { stuck: number; recovered: number } {
+    return { stuck: this.paintStuckCount, recovered: this.paintRecoveredCount };
   }
 
   // ========================================

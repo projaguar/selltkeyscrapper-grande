@@ -222,6 +222,9 @@ export interface CrawlerHealth {
     parks: number;
     zombies: number;
     pressurePauses: number;
+    /** 페인트 경로 정지 감지 / 리로드로 복구된 횟수. stuck 이 늘면 무증상 블랙아웃이 발생 중이다. */
+    paintStuck: number;
+    paintRecovered: number;
   };
 }
 
@@ -273,6 +276,8 @@ export function getCrawlerHealth(): CrawlerHealth {
       parks: cumulativeParks,
       zombies: cumulativeZombies,
       pressurePauses: cumulativePressurePauses,
+      paintStuck: holders.reduce((n, h) => n + h.browser.paintStats().stuck, 0),
+      paintRecovered: holders.reduce((n, h) => n + h.browser.paintStats().recovered, 0),
     },
   };
 }
