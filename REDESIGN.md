@@ -6,6 +6,9 @@
 > 근거: 2026-07-29 전면 감사(5슬라이스 병렬, 원시 발견 86건 → P0 20 / P1 25 / P2 15).
 > 감사 원문: `agent://ProxyOwnershipAudit`, `BrokerLayerAudit`, `BrowserLifecycleAudit`,
 > `ProfilePoolAudit`, `OrchestrationAudit`.
+>
+> ⚠️ **이 설계가 실제로 어떻게 작동했고 무엇이 실패했는지는 `KNOWN_ISSUES.md` 를 먼저 읽을 것.**
+> 특히 이후 추가한 페인트 경로 프로브(rAF)는 **대규모 오탐으로 운영을 악화시켰고 미수정 상태**다.
 
 ---
 
